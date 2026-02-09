@@ -116,36 +116,70 @@ class YarnService {
 
   // ================= ADD YARN =================
 
-  Future<void> addYarn(String qr, Map<String, dynamic> data, {int? binId}) async {
-    String systemId = await _generateUniqueYarnId();
+  Future<String> addYarn(String qr, Map<String, dynamic> data, {int? binId, int? rackId}) async {
+    try {
+      print('DEBUG: addYarn called for qr: $qr');
+      String systemId = await _generateUniqueYarnId();
+      print('DEBUG: Generated systemId: $systemId');
 
-    final filteredData = Map<String, dynamic>.from(data);
-    filteredData.removeWhere(
-            (key, value) => value.toString().toLowerCase() == 'unknown');
+      final filteredData = Map<String, dynamic>.from(data);
+      filteredData.removeWhere(
+              (key, value) => value.toString().toLowerCase() == 'unknown');
 
-    final fullData = {
-      ...filteredData,
-      'rawQr': qr.trim(),
-      'id': systemId,
-      'originalQrId': data['id'],
-      'binId': binId, // Add binId relation
-      'createdAt': FieldValue.serverTimestamp(),
-    };
-    
-    // Also add to reserved_collection immediately? Or just yarnRolls?
-    // Original code added to 'yarnRolls'.
-    // NOTE: 'reserved_collection' seems to be a separate collection for the flow?
-    // User Flow: "Each scan adds a yarn roll to the active bin"
-    // Requirement: "All scanned data must be stored correctly... maintaining proper relationships"
-    
-     await _db.collection('yarnRolls').doc(systemId).set(fullData);
-     
-     // If we are in "Add Yarn" flow, it might imply adding to inventory implies 'active' state?
-     // Or do we add to reserved?
-     // Let's assume yarnRolls is the inventory.
+      // Ensure bin info is stored consistently as "bin" (string)
+      String? finalBin;
+      if (binId != null) {
+        finalBin = binId.toString();
+      } else {
+        // Check if data already has bin info in various formats
+        finalBin = (filteredData['bin'] ?? filteredData['binId'] ?? filteredData['Bin'] ?? filteredData['Bin Id'])?.toString();
+      }
+      
+      // Prefix bin with 'B' if it's just a number
+      if (finalBin != null && RegExp(r'^\d+$').hasMatch(finalBin)) {
+        finalBin = 'B$finalBin';
+      }
+
+      // Clean up redundant bin fields
+      filteredData.remove('binId');
+      filteredData.remove('Bin Id');
+      filteredData.remove('Bin');
+
+      // Ensure all requested fields are present or defaulted
+      final now = DateTime.now().toUtc().toIso8601String();
+
+      final fullData = {
+        'lot_number': filteredData['lot_number'] ?? filteredData['Lot Number'] ?? 'LOT-GEN-${DateTime.now().millisecondsSinceEpoch.toString().substring(9)}',
+        'order_id': filteredData['order_id'] ?? filteredData['Order Id'] ?? 'ORD-NONE',
+        'supplier_name': filteredData['supplier_name'] ?? filteredData['Supplier Name'] ?? 'ABC Textiles',
+        'quality_grade': filteredData['quality_grade'] ?? filteredData['Quality Grade'] ?? 'A',
+        'weight': filteredData['weight'] ?? filteredData['Weight'] ?? 25,
+        'production_date': filteredData['production_date'] ?? filteredData['Production Date'] ?? now,
+        ...filteredData,
+        'id': systemId,
+        'originalQrId': data['id'] ?? data['yarnId'] ?? data['ID'] ?? qr.trim(),
+        'bin': finalBin ?? 'B1',
+        'state': 'IN STOCK', // Set state to "IN STOCK" as requested
+        'createdAt': now,
+        'last_state_change': now,
+        'rack_id': (rackId ?? data['rack_id'] ?? data['rackId'] ?? '1').toString(),
+      };
+      
+      fullData['rawQr'] = qr.trim();
+
+      print('DEBUG: Saving to Firestore document: $systemId in collection: yarnRolls');
+      print('DEBUG: Data payload: ${jsonEncode(fullData)}');
+       await _db.collection('yarnRolls').doc(systemId).set(fullData);
+       print('DEBUG: Firestore set SUCCESSFUL for $systemId');
+       return systemId;
+    } catch (e) {
+      print('DEBUG ERROR in addYarn: $e');
+      rethrow;
+    }
   }
 
   Future<String> _generateUniqueYarnId() async {
+    final year = DateTime.now().year.toString();
     try {
       final snapshot = await _db
           .collection('yarnRolls')
@@ -153,13 +187,26 @@ class YarnService {
           .limit(1)
           .get();
 
-      if (snapshot.docs.isEmpty) return 'YR-00001';
+      if (snapshot.docs.isEmpty) {
+        print('DEBUG: No existing yarns found, starting with 001');
+        return 'YR-$year-001';
+      }
 
       final lastId = snapshot.docs.first.get('id') as String;
-      final num = int.parse(lastId.replaceAll('YR-', '')) + 1;
-      return 'YR-${num.toString().padLeft(5, '0')}';
-    } catch (_) {
-      return 'YR-${DateTime.now().millisecondsSinceEpoch.toString().substring(7)}';
+      print('DEBUG: Last ID in DB: $lastId');
+      final parts = lastId.split('-');
+      int lastNum = 0;
+      if (parts.length >= 3) {
+          lastNum = int.tryParse(parts.last) ?? 0;
+      } else if (parts.length == 2) {
+          lastNum = int.tryParse(parts.last) ?? 0;
+      }
+      
+      final nextNum = lastNum + 1;
+      return 'YR-$year-$nextNum';
+    } catch (e) {
+      print('DEBUG ERROR in _generateUniqueYarnId: $e');
+      return 'YR-$year-${DateTime.now().millisecondsSinceEpoch.toString().substring(10)}';
     }
   }
 
@@ -169,28 +216,24 @@ class YarnService {
     try {
       final decoded = json.decode(trimmed);
       if (decoded is Map<String, dynamic>) {
-        // Convert all keys to readable format
         final Map<String, dynamic> humanReadable = {};
         decoded.forEach((key, value) {
           if (value != null && value.toString().toLowerCase() != 'unknown') {
-            humanReadable[_capitalizeKey(key)] = value;
+            humanReadable[_snakeCaseKey(key)] = value;
           }
         });
-        return humanReadable.isEmpty ? {'ID': trimmed} : humanReadable;
+        return humanReadable;
       }
-    } catch (_) {
-      // Not JSON? Treat as plain QR code
-    }
-    return {'ID': trimmed};
+    } catch (_) {}
+    return {};
   }
 
-  String _capitalizeKey(String key) {
+  String _snakeCaseKey(String key) {
     return key
-        .replaceAll('_', ' ')
-        .split(' ')
-        .map((word) =>
-    word.isNotEmpty ? '${word[0].toUpperCase()}${word.substring(1)}' : '')
-        .join(' ');
+        .toLowerCase()
+        .replaceAll(' ', '_')
+        .replaceAll('-', '_')
+        .replaceAll(RegExp(r'[^a-z0-9_]'), '');
   }
 
   Future<void> deleteYarn(String qr) {

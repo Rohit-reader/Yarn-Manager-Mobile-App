@@ -23,13 +23,13 @@ class _MainPageState extends State<MainPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    return SafeArea(child: Scaffold(
       appBar: AppBar(title: const Text('Yarn Scanner')),
       body: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
         child: _isLoading ? _shimmerLoader() : _mainContent(context),
       ),
-    );
+    ));
   }
 
   Widget _mainContent(BuildContext context) {
@@ -82,7 +82,7 @@ class _MainPageState extends State<MainPage> {
 
         // Footer text at the bottom
         Text(
-          '© 2026 Yarn Manager. All rights reserved.',
+          '© 2026 Yarn Scanner. All rights reserved.',
           style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
           textAlign: TextAlign.center
         ),

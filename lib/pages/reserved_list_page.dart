@@ -37,7 +37,7 @@ class _ReservedListPageState extends State<ReservedListPage>
   Widget build(BuildContext context) {
     final primaryColor = Colors.green.shade700;
 
-    return Scaffold(
+    return SafeArea(child: Scaffold(
         backgroundColor: Colors.white, // Scaffold background
         appBar: AppBar(
           elevation: 1,
@@ -445,6 +445,6 @@ class _ReservedListPageState extends State<ReservedListPage>
             ],
           ),
         ),
-        );
+        ));
     }
 }

@@ -4,6 +4,8 @@ import 'package:path_provider/path_provider.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:pdf/pdf.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+
+import 'dart:convert';
 import '../services/yarn_service.dart';
 import './qr_code.dart';
 
@@ -11,12 +13,16 @@ class YarnDataPage extends StatefulWidget {
   final String qr;
   final String? expectedQr;
   final bool isAddMode;
+  final int? binId;
+  final int? rackId;
 
   const YarnDataPage({
     super.key,
     required this.qr,
     this.expectedQr,
     this.isAddMode = false,
+    this.binId,
+    this.rackId,
   });
 
   @override
@@ -38,12 +44,23 @@ class _YarnDataPageState extends State<YarnDataPage> {
     setState(() => isLoading = true);
     try {
       final yarnService = YarnService();
-      final doc = await yarnService.findYarnByContent(widget.qr);
-      // YarnService now returns DocumentSnapshot?
-      if (doc != null && doc.exists) {
-        setState(() => yarnData = doc.data() as Map<String, dynamic>);
+      
+      if (widget.isAddMode) {
+          // Parse directly from QR since it's not in DB yet
+          final parsed = yarnService.parseYarnData(widget.qr);
+          setState(() {
+              yarnData = parsed;
+              // Add temp display fields for Rack/Bin if passed
+              if (widget.rackId != null) yarnData!['rack_id'] = widget.rackId;
+              if (widget.binId != null) yarnData!['bin_id'] = widget.binId;
+          });
       } else {
-        setState(() => yarnData = {'id': widget.qr, 'notFound': true});
+          final doc = await yarnService.findYarnByContent(widget.qr);
+          if (doc != null && doc.exists) {
+            setState(() => yarnData = doc.data() as Map<String, dynamic>);
+          } else {
+            setState(() => yarnData = {'id': widget.qr, 'notFound': true});
+          }
       }
     } catch (_) {
       setState(() => yarnData = {'id': widget.qr, 'error': 'Failed to fetch'});
@@ -102,21 +119,35 @@ class _YarnDataPageState extends State<YarnDataPage> {
     setState(() => isProcessing = true);
     try {
       final yarnService = YarnService();
-      await yarnService.addYarn(widget.qr, yarnData!);
+      
+      // Pass the explicit bin/rack IDs if available
+      String systemId = await yarnService.addYarn(
+          widget.qr, 
+          yarnData!, 
+          binId: widget.binId, 
+          rackId: widget.rackId
+      );
 
       if (!mounted) return;
 
       // Show acknowledgment
       showAck(context, 'Yarn confirmed successfully!');
-
-      // Navigate after short delay
-      Future.delayed(const Duration(milliseconds: 800), () {
-        Navigator.popUntil(context, (route) => route.isFirst);
-      });
+      
+      // Navigate after close
+      if (mounted) {
+          Navigator.popUntil(context, (route) => route.isFirst);
+      }
+    } catch (e) {
+      if (mounted) {
+        showAck(context, 'Error saving yarn: ${e.toString()}');
+        print('DEBUG ERROR in _confirmYarn: $e');
+      }
     } finally {
-      setState(() => isProcessing = false);
+      if (mounted) setState(() => isProcessing = false);
     }
   }
+
+
 
   /// Navigate to QR scanner page
   void _rescan() {
@@ -196,10 +227,14 @@ class _YarnDataPageState extends State<YarnDataPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    // Styling inspired by ReservedListPage
+    final primaryColor = Colors.green.shade700;
+    
+    return SafeArea(child: Scaffold(
+      backgroundColor: Colors.white,
       appBar: AppBar(
         backgroundColor: Colors.white,
-        title: const Text('Yarn Invoice'),
+        title: Text(widget.isAddMode ? 'Confirm Addition' : 'Yarn Details'),
         automaticallyImplyLeading: false,
         actions: [
           IconButton(
@@ -216,71 +251,117 @@ class _YarnDataPageState extends State<YarnDataPage> {
           : SingleChildScrollView(
         padding: const EdgeInsets.all(16),
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Invoice-style data container
+            // ================== CARD STYLE (Like Reserved List) ==================
             Container(
-              padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(
                 color: Colors.white,
-                borderRadius: BorderRadius.circular(12),
+                borderRadius: BorderRadius.circular(16),
                 boxShadow: [
                   BoxShadow(
-                    color: Colors.grey.withOpacity(0.2),
-                    blurRadius: 8,
-                    offset: const Offset(0, 4),
+                    color: Colors.black.withOpacity(0.05),
+                    blurRadius: 15,
+                    offset: const Offset(0, 8),
                   ),
                 ],
+                border: Border.all(color: Colors.grey.shade100)
               ),
+              padding: const EdgeInsets.all(20),
               child: Column(
-                children: yarnData!.entries
-                    .where((e) => ![
-                  'notFound',
-                  'status',
-                  'createdAt',
-                  'rawQr',
-                  'qrimage'
-                ].contains(e.key.toLowerCase()))
-                    .map(
-                      (e) => Container(
-                    padding:
-                    const EdgeInsets.symmetric(vertical: 10),
-                    decoration: BoxDecoration(
-                      border: Border(
-                        bottom: BorderSide(
-                          color: Colors.grey.shade300,
-                        ),
-                      ),
-                    ),
-                    child: Row(
-                      mainAxisAlignment:
-                      MainAxisAlignment.spaceBetween,
+                children: [
+                   Row(
                       children: [
-                        Text(
-                          _capitalize(e.key),
-                          style: const TextStyle(
-                              fontWeight: FontWeight.w600,
-                              fontSize: 14,
-                              color: Colors.black54),
+                        Container(
+                          decoration: BoxDecoration(
+                            color: Colors.green.withOpacity(0.15),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          padding: const EdgeInsets.all(16),
+                          child: Icon(
+                            Icons.inventory_2_outlined,
+                            color: primaryColor,
+                            size: 32,
+                          ),
                         ),
-                        Flexible(
-                          child: Text(
-                            e.value.toString(),
-                            textAlign: TextAlign.right,
-                            style: const TextStyle(
-                                fontWeight: FontWeight.bold,
-                                fontSize: 15,
-                                color: Colors.black87),
+                        const SizedBox(width: 16),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                yarnData!['id'] ?? yarnData!['yarnId'] ?? 'Unknown ID',
+                                style: const TextStyle(
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.bold,
+                                  color: Colors.black87
+                                ),
+                              ),
+                              const SizedBox(height: 6),
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 10, vertical: 4),
+                                decoration: BoxDecoration(
+                                  color: widget.isAddMode ? Colors.blue.withOpacity(0.15) : Colors.green.withOpacity(0.15),
+                                  borderRadius: BorderRadius.circular(20),
+                                ),
+                                child: Text(
+                                  widget.isAddMode ? 'NEW ENTRY' : 'RESERVED',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w700,
+                                    color: widget.isAddMode ? Colors.blue : Colors.green,
+                                  ),
+                                ),
+                              ),
+                            ],
                           ),
                         ),
                       ],
                     ),
-                  ),
-                )
-                    .toList(),
+                    const SizedBox(height: 24),
+                    const Divider(height: 1),
+                    const SizedBox(height: 16),
+                    
+                    // Detailed List inside Card
+                    ...yarnData!.entries
+                    .where((e) => ![
+                  'notFound', 'status', 'createdAt', 'rawQr', 'qrimage',
+                  'originalQrId', 'last_state_change', 'id', 'yarnId'
+                ].contains(e.key.toLowerCase()))
+                    .map(
+                      (e) => Padding(
+                        padding: const EdgeInsets.only(bottom: 12),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text(
+                              _capitalize(e.key),
+                              style: TextStyle(
+                                  fontWeight: FontWeight.w500,
+                                  fontSize: 14,
+                                  color: Colors.grey.shade600),
+                            ),
+                            Flexible(
+                              child: Text(
+                                e.value.toString(),
+                                textAlign: TextAlign.right,
+                                style: const TextStyle(
+                                    fontWeight: FontWeight.w600,
+                                    fontSize: 15,
+                                    color: Colors.black87),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ).toList(),
+                ],
               ),
             ),
-            const SizedBox(height: 24),
+            
+            const SizedBox(height: 30),
+            
+            // ================== ACTION BUTTONS ==================
             if (isProcessing)
               const Center(
                   child:
@@ -288,7 +369,7 @@ class _YarnDataPageState extends State<YarnDataPage> {
             else
               Row(
                 children: [
-                  // RESCAN Button
+                  // CANCEL / RESCAN Button
                   Expanded(
                     child: Container(
                       decoration: BoxDecoration(
@@ -330,7 +411,8 @@ class _YarnDataPageState extends State<YarnDataPage> {
                   ),
                   const SizedBox(width: 16),
 
-                  // CONFIRM Button
+                  // CONFIRM Button (Only in Add Mode or if action available)
+                  if (widget.isAddMode)
                   Expanded(
                     child: Container(
                       decoration: BoxDecoration(
@@ -358,7 +440,7 @@ class _YarnDataPageState extends State<YarnDataPage> {
                             padding: EdgeInsets.symmetric(vertical: 14),
                             child: Center(
                               child: Text(
-                                'Confirm',
+                                'Confirm Add',
                                 style: TextStyle(
                                     color: Colors.white,
                                     fontWeight: FontWeight.bold,
@@ -375,6 +457,6 @@ class _YarnDataPageState extends State<YarnDataPage> {
           ],
         ),
       ),
-    );
+    ));
   }
 }

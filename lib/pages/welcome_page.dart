@@ -75,7 +75,7 @@ class _WelcomePageState extends State<WelcomePage>
   Widget build(BuildContext context) {
     final size = MediaQuery.of(context).size;
 
-    return Scaffold(
+    return SafeArea(child: Scaffold(
       body: Container(
         width: size.width,
         height: size.height,
@@ -140,8 +140,10 @@ class _WelcomePageState extends State<WelcomePage>
                           ),
                           SizedBox(height: 12),
                           Text(
+                            textAlign: TextAlign.center,
                             'Smart QR-based yarn inventory management',
                             style: TextStyle(
+                              
                               color: Colors.black54,
                               fontSize: 16,
                             ),
@@ -222,6 +224,6 @@ class _WelcomePageState extends State<WelcomePage>
           ],
         ),
       ),
-    );
+    ));
   }
 }

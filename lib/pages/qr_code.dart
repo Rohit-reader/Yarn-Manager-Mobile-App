@@ -47,7 +47,7 @@ class _ScanCodePageState extends State<ScanCodePage>
     animationController = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 2),
-    )..repeat(reverse: false);
+    )..repeat(reverse: true);
 
     laserAnimation = Tween<double>(begin: 0, end: 1).animate(
       CurvedAnimation(parent: animationController, curve: Curves.linear),
@@ -121,32 +121,28 @@ class _ScanCodePageState extends State<ScanCodePage>
   // --- Parsing Helpers ---
 
   int? _tryParseRackId(String qr) {
-      // 1. Regex
-      final regex = RegExp(r'Rack\s*[:\-\s]\s*(\d+)', caseSensitive: false);
-      final match = regex.firstMatch(qr);
-      if (match != null) return int.tryParse(match.group(1)!);
-
-      // 2. JSON
+      // 1. JSON-like structure or Strict JSON
       try {
           final decoded = _safeJsonDecode(qr);
           if (decoded != null && decoded is Map) {
-              // Strict check: Must NOT have yarn-specific keys to avoid false positive
+              // Avoid false positives with yarn data
               if (decoded.containsKey('yarnId') || decoded.containsKey('color')) return null;
 
-              final val = decoded['rack'] ?? decoded['Rack']; // Only look for explicit 'rack' key
+              final val = decoded['rack'] ?? decoded['Rack'];
               if (val != null) return int.tryParse(val.toString().trim());
           }
       } catch(_) {}
+
+      // 2. Regex for "Rack : 1" or "{"rack": 1}"
+      final regex = RegExp(r'(?:Rack|rack)\s*["\s]*[:\-\s]\s*["\s]*(\d+)', caseSensitive: false);
+      final match = regex.firstMatch(qr);
+      if (match != null) return int.tryParse(match.group(1)!);
+
       return null;
   }
 
   int? _tryParseBinId(String qr) {
-      // 1. Regex
-      final regex = RegExp(r'Bin\s*[:\-\s]\s*(\d+)', caseSensitive: false);
-      final match = regex.firstMatch(qr);
-      if (match != null) return int.tryParse(match.group(1)!);
-
-      // 2. JSON
+      // 1. JSON-like structure or Strict JSON
       try {
           final decoded = _safeJsonDecode(qr);
           if (decoded != null && decoded is Map) {
@@ -156,6 +152,12 @@ class _ScanCodePageState extends State<ScanCodePage>
               if (val != null) return int.tryParse(val.toString().trim());
           }
       } catch(_) {}
+
+      // 2. Regex for "Bin : 5" or "{"bin": 5}"
+      final regex = RegExp(r'(?:Bin|bin)\s*["\s]*[:\-\s]\s*["\s]*(\d+)', caseSensitive: false);
+      final match = regex.firstMatch(qr);
+      if (match != null) return int.tryParse(match.group(1)!);
+
       return null;
   }
 
@@ -196,27 +198,11 @@ class _ScanCodePageState extends State<ScanCodePage>
   }
 
   Future<void> _processYarnScan(String qr) async {
-      if (widget.isAddMode) {
-          if (currentBinId != null) {
-             // Add directly to bin
-             Map<String, dynamic> data = _yarnService.parseYarnData(qr);
-             await _yarnService.addYarn(qr, data, binId: currentBinId);
-             _showToast('Inventory Updated: Added to Bin $currentBinId', isError: false);
-             return;
-          } else {
-              // Warn user they are adding without a bin? or Just allow it?
-              // Req says: "Each scan adds a yarn roll to the active bin"
-              // implies active bin is required?
-              // We'll prompt them.
-              _showToast('⚠️ Select a Bin first to add inventory!', isError: true);
-              return;
-         }
-      }
 
       // Default behavior (View Details / Verify)
       controller?.stop();
       setState(() => isScanning = false);
-      
+
       await Navigator.push(
           context,
           MaterialPageRoute(
@@ -224,16 +210,19 @@ class _ScanCodePageState extends State<ScanCodePage>
               qr: qr,
               expectedQr: widget.expectedQr,
               isAddMode: widget.isAddMode,
+                binId: currentBinId,
+                rackId: currentRackId,
             ),
           ),
       );
-    
+
       if (mounted) {
         setState(() => isScanning = true);
         controller?.start();
         if (!widget.isAddMode) _startIdleTimer();
       }
   }
+
 
   void _showToast(String msg, {bool isError = false}) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -248,7 +237,7 @@ class _ScanCodePageState extends State<ScanCodePage>
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    return SafeArea(child:Scaffold(
       backgroundColor: Colors.black,
       body: Stack(
         children: [
@@ -261,23 +250,41 @@ class _ScanCodePageState extends State<ScanCodePage>
           // 2. Scanner Overlay (Darken outer area)
           _buildScannerOverlay(context),
           
-          // 3. Laser Animation
-          Center(
+          // 3. Scanning Animation (Corner Brackets + Moving Laser)
+          Align(
+            alignment: Alignment.center,
             child: SizedBox(
-              width: MediaQuery.of(context).size.width * 0.8,
-              height: 2,
-              child: AnimatedBuilder(
-                animation: laserAnimation,
-                builder: (context, child) {
-                  return Container(
-                    decoration: BoxDecoration(
-                      color: Colors.redAccent.withOpacity(0.8),
-                      boxShadow: [
-                        BoxShadow(color: Colors.redAccent.withOpacity(0.5), blurRadius: 10)
-                      ]
-                    ),
-                  );
-                },
+              width: MediaQuery.of(context).size.width * 0.7,
+              height: MediaQuery.of(context).size.width * 0.7,
+              child: Stack(
+                children: [
+                  // Corner brackets
+                  _buildScannerCorners(),
+                  // Moving laser
+                  AnimatedBuilder(
+                    animation: laserAnimation,
+                    builder: (context, child) {
+                      return Positioned(
+                        top: laserAnimation.value * (MediaQuery.of(context).size.width * 0.7 - 2),
+                        left: 0,
+                        right: 0,
+                        child: Container(
+                          height: 2,
+                          decoration: BoxDecoration(
+                            color: Colors.redAccent.withOpacity(0.8),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.redAccent.withOpacity(0.5),
+                                blurRadius: 10,
+                                spreadRadius: 1,
+                              )
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ],
               ),
             ),
           ),
@@ -330,6 +337,7 @@ class _ScanCodePageState extends State<ScanCodePage>
             ),
         ],
       ),
+    )
     );
   }
 
@@ -399,7 +407,7 @@ class _ScanCodePageState extends State<ScanCodePage>
   Widget _buildScannerOverlay(BuildContext context) {
     return ColorFiltered(
       colorFilter: ColorFilter.mode(
-        Colors.black.withOpacity(0.5),
+        Colors.black.withOpacity(0.6),
         BlendMode.srcOut,
       ),
       child: Stack(
@@ -424,5 +432,68 @@ class _ScanCodePageState extends State<ScanCodePage>
         ],
       ),
     );
+  }
+
+  Widget _buildScannerCorners() {
+      const double cornerSize = 30;
+      const double strokeWidth = 5;
+      const Color cornerColor = Colors.white;
+
+      return Stack(
+          children: [
+              // Top Left
+              Positioned(
+                  top: 0, left: 0,
+                  child: Container(
+                      width: cornerSize, height: cornerSize,
+                      decoration: const BoxDecoration(
+                          border: Border(
+                              top: BorderSide(color: cornerColor, width: strokeWidth),
+                              left: BorderSide(color: cornerColor, width: strokeWidth),
+                          ),
+                      ),
+                  ),
+              ),
+              // Top Right
+              Positioned(
+                  top: 0, right: 0,
+                  child: Container(
+                      width: cornerSize, height: cornerSize,
+                      decoration: const BoxDecoration(
+                          border: Border(
+                              top: BorderSide(color: cornerColor, width: strokeWidth),
+                              right: BorderSide(color: cornerColor, width: strokeWidth),
+                          ),
+                      ),
+                  ),
+              ),
+              // Bottom Left
+              Positioned(
+                  bottom: 0, left: 0,
+                  child: Container(
+                      width: cornerSize, height: cornerSize,
+                      decoration: const BoxDecoration(
+                          border: Border(
+                              bottom: BorderSide(color: cornerColor, width: strokeWidth),
+                              left: BorderSide(color: cornerColor, width: strokeWidth),
+                          ),
+                      ),
+                  ),
+              ),
+              // Bottom Right
+              Positioned(
+                  bottom: 0, right: 0,
+                  child: Container(
+                      width: cornerSize, height: cornerSize,
+                      decoration: const BoxDecoration(
+                          border: Border(
+                              bottom: BorderSide(color: cornerColor, width: strokeWidth),
+                              right: BorderSide(color: cornerColor, width: strokeWidth),
+                          ),
+                      ),
+                  ),
+              ),
+          ],
+      );
   }
 }

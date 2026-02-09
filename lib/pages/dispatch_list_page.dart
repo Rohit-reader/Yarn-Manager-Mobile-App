@@ -37,7 +37,7 @@ class _DispatchListPageState extends State<DispatchListPage>
   Widget build(BuildContext context) {
     final primaryColor = Colors.orange.shade400;
 
-    return Scaffold(
+    return SafeArea(child: Scaffold(
       backgroundColor: Colors.white,
       appBar: AppBar(
         centerTitle: true,
@@ -320,6 +320,7 @@ class _DispatchListPageState extends State<DispatchListPage>
           ),
         ],
       ),
+    )
     );
   }
 
