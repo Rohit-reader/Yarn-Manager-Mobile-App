@@ -70,15 +70,18 @@ class YarnService {
   }
 
   /// Finds the next available bin with sufficient capacity (Count & Weight).
-  Future<Map<String, int>?> getNextAvailableBin({int count = 1, double weightPerRoll = 25.0}) async {
+  /// [minRackId] and [minBinId] restrict the search to monotonic increasing locations.
+  Future<Map<String, int>?> getNextAvailableBin({
+      int count = 1, 
+      double weightPerRoll = 25.0,
+      int minRackId = 1,
+      int minBinId = 1
+  }) async {
     final rules = await _getInventoryRules();
     final int maxRolls = rules['max_rolls'];
     final double maxBinWeight = rules['max_weight'];
     
     final double requiredWeight = count * weightPerRoll;
-
-    print('DEBUG: Limits -> Max Rolls: $maxRolls, Max Weight: $maxBinWeight');
-    print('DEBUG: Required -> Rolls: $count, Weight: $requiredWeight');
     
     int maxRackId = 0;
     int maxBinId = 0;
@@ -103,8 +106,14 @@ class YarnService {
       }
       
       if (rackId == null) continue;
+      
+      // Skip Racks below minRackId
+      if (rackId < minRackId) continue;
+      
       if (rackId > maxRackId) maxRackId = rackId;
-      lastSeenRackId = rackId;
+      lastSeenRackId = rackId; 
+      
+      // ... rest of logic
 
       // 2. Get all Bins for this Rack
       // NOTE: Removed orderBy('id') here to avoid composite index error.
@@ -155,6 +164,10 @@ class YarnService {
         }
         
         if (binId == null) continue;
+        
+        // Skip Bins below minBinId ONLY if we are in the minRack
+        if (rackId == minRackId && binId < minBinId) continue;
+        
         if (binId > maxBinId) maxBinId = binId;
 
         // 3. Check occupancy (Count & Weight)
@@ -276,39 +289,59 @@ class YarnService {
   Future<String> addYarn(String qr, Map<String, dynamic> data, {int? binId, int? rackId, int count = 1, double? weightOverride}) async {
     String lastId = '';
     
-    // We ignore the passed 'binId'/'rackId' for batch > 1 to ensure distribution logic
-    // unless count is 1, in which case we honor the override if valid.
+    // We maintain a "pointer" to the current best bin
+    // initialized with the passed manual overrides or defaults.
+    int currentRack = rackId ?? 1;
+    int currentBin = binId ?? 1;
     
     for (int i = 0; i < count; i++) {
         try {
           print('DEBUG: Processing Roll $i/$count');
           
-          // 1. Determine Location for THIS specific roll
-          int finalRack = 1;
-          int finalBin = 1;
-
-          // If user passed explicit single location and count is 1, use it. 
-          // But if batch, we MUST recalculate to ensure flow.
-          if (count == 1 && binId != null && rackId != null) {
-              finalRack = rackId;
-              finalBin = binId;
-          } else {
-             // Dynamic lookup
-             // Use weightOverride or rules default
-             final rules = await _getInventoryRules();
-             double w = weightOverride ?? rules['default_weight'];
-             if (data['weight'] is num) w = data['weight'].toDouble(); 
-             
-             final next = await getNextAvailableBin(count: 1, weightPerRoll: w);
-             if (next != null) {
-                 finalRack = next['rackId']!;
-                 finalBin = next['binId']!;
-             }
+          // Dynamic lookup: Check if current pointer is valid or needs to move forward
+          final rules = await _getInventoryRules();
+          double w = weightOverride ?? rules['default_weight'];
+          if (data['weight'] is num) w = data['weight'].toDouble(); 
+          
+          // Check capacity of CURRENT pointer specifically
+          bool fitsInCurrent = await _checkBinCapacity(
+              currentRack, currentBin, 1, w, 
+              rules['max_rolls'], rules['max_weight']
+          );
+          
+          if (!fitsInCurrent) {
+               // Must find NEXT available bin, starting search strictly AFTER current
+               // Actually, search inclusive from current? No, we know current failed.
+               // Search from currentRack, currentBin + 1?
+               // But minBinId logic in check is inclusive.
+               // So let's ask for next available starting from current.
+               // If it returns same bin, we're stuck? 
+               // Wait, `getNextAvailableBin` checks capacity. So if current is full, it WONT return it.
+               
+               print('DEBUG: Bin $currentBin (Rack $currentRack) full/invalid. Searching forward...');
+               final next = await getNextAvailableBin(
+                   count: 1, 
+                   weightPerRoll: w,
+                   minRackId: currentRack,
+                   minBinId: currentBin
+               );
+               
+               if (next != null) {
+                   currentRack = next['rackId']!;
+                   currentBin = next['binId']!;
+               } else {
+                   // Overflow logic is inside getNext... so this implies major failure
+                   // Fallback to purely incrementing bin ID if needed
+                   currentBin++; 
+               }
           }
+          
+          // At this point, currentRack/currentBin *should* be valid
           
           String systemId = await _generateUniqueYarnId();
           lastId = systemId; 
-
+          
+          // ... rest of save logic ...
           final filteredData = Map<String, dynamic>.from(data);
           filteredData.removeWhere(
                   (key, value) => value.toString().toLowerCase() == 'unknown');
@@ -329,17 +362,17 @@ class YarnService {
             ...filteredData,
             'id': systemId,
             'originalQrId': data['id'] ?? data['yarnId'] ?? qr.trim(),
-            'bin': 'B$finalBin', // Enforce B prefix
+            'bin': 'B$currentBin', // Enforce B prefix
             'state': 'IN STOCK',
             'createdAt': now,
             'last_state_change': now,
-            'rack_id': finalRack.toString(),
+            'rack_id': currentRack.toString(),
           };
           
           fullData['rawQr'] = qr.trim();
 
           await _db.collection('yarnRolls').doc(systemId).set(fullData);
-          print('DEBUG: Saved Roll $i to Rack $finalRack, Bin B$finalBin');
+          print('DEBUG: Saved Roll $i to Rack $currentRack, Bin B$currentBin');
           
         } catch (e) {
           print('DEBUG ERROR in addYarn batch $i: $e');

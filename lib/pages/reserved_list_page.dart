@@ -210,52 +210,18 @@ class _ReservedListPageState extends State<ReservedListPage>
                               ),
                               confirmDismiss: (direction) async {
                                 if (direction == DismissDirection.startToEnd) {
-                                  final scanSuccess = await Navigator.push(
+                                  await Navigator.push(
                                     context,
                                     MaterialPageRoute(
                                       builder: (_) => ScanCodePage(
                                         expectedQr: yarnId.toString(),
+                                        reservedDocId: doc.id,
                                         title: 'Verify Move - $yarnId',
                                       ),
                                     ),
                                   );
-
-                                  if (scanSuccess == true) {
-                                    if (!context.mounted) return false;
-                                    final confirmed = await showDialog<bool>(
-                                      context: context,
-                                      builder: (ctx) => AlertDialog(
-                                        backgroundColor: Colors.white,
-                                        shape: RoundedRectangleBorder(
-                                          borderRadius: BorderRadius.circular(12),
-                                        ),
-                                        title: const Text(
-                                          'Confirm Move',
-                                          style: TextStyle(color: Colors.greenAccent),
-                                        ),
-                                        content: Text('Move Yarn $yarnId to Floor?'),
-                                        actions: [
-                                          TextButton(
-                                            onPressed: () =>
-                                                Navigator.pop(ctx, false),
-                                            child: const Text('CANCEL'),
-                                          ),
-                                          ElevatedButton(
-                                            style: ElevatedButton.styleFrom(
-                                                backgroundColor: Colors.greenAccent),
-                                            onPressed: () =>
-                                                Navigator.pop(ctx, true),
-                                            child: const Text('CONFIRM'),
-                                          ),
-                                        ],
-                                      ),
-                                    );
-
-                                    if (confirmed == true) {
-                                      await yarnService.updateYarnStatus(
-                                          doc.id, 'moved');
-                                    }
-                                  }
+                                  
+                                  // YarnDataPage handles the move confirmation
                                   return false;
                                 } else {
                                   final confirmRemove = await showDialog<bool>(

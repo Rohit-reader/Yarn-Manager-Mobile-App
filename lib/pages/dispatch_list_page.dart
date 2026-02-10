@@ -195,33 +195,20 @@ class _DispatchListPageState extends State<DispatchListPage>
                           ),
                           confirmDismiss: (direction) async {
                             if (direction == DismissDirection.startToEnd) {
-                              final scanSuccess = await Navigator.push(
-                                context,
-                                MaterialPageRoute(
-                                  builder: (_) => ScanCodePage(
-                                    expectedQr: yarnId.toString(),
-                                    title: 'Verify Dispatch - $yarnId',
-                                  ),
-                                ),
-                              );
-
-                              if (scanSuccess == true) {
-                                if (!context.mounted) return false;
-                                final confirmed = await showDialog<bool>(
-                                  context: context,
-                                  builder: (ctx) => _buildGlassDialog(
+                                  await Navigator.push(
                                     context,
-                                    title: 'Confirm Dispatch',
-                                    message: 'Final step: Dispatch Yarn $yarnId?',
-                                    confirmColor: Colors.orangeAccent,
-                                  ),
-                                );
-
-                                if (confirmed == true) {
-                                  await yarnService.updateYarnStatus(doc.id, 'dispatched');
-                                }
-                              }
-                              return false;
+                                    MaterialPageRoute(
+                                      builder: (_) => ScanCodePage(
+                                        expectedQr: yarnId.toString(),
+                                        reservedDocId: doc.id,
+                                        isDispatchMode: true,
+                                        title: 'Verify Dispatch - $yarnId',
+                                      ),
+                                    ),
+                                  );
+                                  
+                                  // YarnDataPage handles dispatch/deletion
+                                  return false;
                             } else {
                               final confirmRemove = await showDialog<bool>(
                                 context: context,

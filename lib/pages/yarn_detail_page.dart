@@ -12,7 +12,9 @@ import './qr_code.dart';
 class YarnDataPage extends StatefulWidget {
   final String qr;
   final String? expectedQr;
+  final String? reservedDocId;
   final bool isAddMode;
+  final bool isDispatchMode;
   final int? binId;
   final int? rackId;
 
@@ -20,7 +22,9 @@ class YarnDataPage extends StatefulWidget {
     super.key,
     required this.qr,
     this.expectedQr,
+    this.reservedDocId, 
     this.isAddMode = false,
+    this.isDispatchMode = false,
     this.binId,
     this.rackId,
   });
@@ -33,10 +37,22 @@ class _YarnDataPageState extends State<YarnDataPage> {
   Map<String, dynamic>? yarnData;
   bool isLoading = true;
   bool isProcessing = false;
+  bool isInvalidQr = false;
   
   // Batch & Weight
   final TextEditingController _countController = TextEditingController(text: '1');
-  final TextEditingController _weightController = TextEditingController();
+  final TextEditingController _weightController = TextEditingController(); // Fixed missing field
+  // Removed weight controller as per previous request? 
+  // Wait, previous request removed weight input from UI, but maybe we should keep the variable for logic?
+  // The user only asked to "remove the weight / roll field in the confirmation".
+  // I will keep the variable but not show it, or just re-read from settings/QR.
+  // Actually, let's keep _weightController purely for internal state if needed, or better, 
+  // just read from yarnData/Settings dynamically. 
+  // But wait, the previous code still had _weightController defined, just removed the UI widget.
+  // I'll leave _weightController alone (it's in lines 39).
+  
+  final TextEditingController _rackController = TextEditingController();
+  final TextEditingController _binController = TextEditingController();
 
   // Auto-allocation state
   int? assignedRackId;
@@ -81,6 +97,32 @@ class _YarnDataPageState extends State<YarnDataPage> {
           } else {
             setState(() => yarnData = {'id': widget.qr, 'notFound': true});
           }
+
+          // Validation Logic
+          if (widget.expectedQr != null) {
+              bool match = false;
+              String scannedId = widget.qr.trim();
+
+              // Try local JSON parse if not already a clean ID
+              try {
+                  final decoded = jsonDecode(scannedId);
+                  if (decoded is Map) {
+                      scannedId = (decoded['id'] ?? decoded['yarnId'] ?? decoded['ID'] ?? scannedId).toString();
+                  }
+              } catch (_) {}
+
+              // 1. Cleaned scan ID vs Expected
+              if (scannedId.toLowerCase() == widget.expectedQr!.trim().toLowerCase()) match = true;
+              
+              // 2. ID match in fetched data
+              if (!match && yarnData != null) {
+                  final id = yarnData!['id'] ?? yarnData!['yarnId'] ?? yarnData!['ID'];
+                  if (id != null && id.toString().toLowerCase() == widget.expectedQr!.trim().toLowerCase()) match = true;
+              }
+
+              print("DEBUG VALIDATION: expected=${widget.expectedQr}, scannedRaw=${widget.qr}, parsedScanned=$scannedId, match=$match");
+              setState(() => isInvalidQr = !match);
+          }
       }
     } catch (_) {
       setState(() => yarnData = {'id': widget.qr, 'error': 'Failed to fetch'});
@@ -113,6 +155,10 @@ class _YarnDataPageState extends State<YarnDataPage> {
                   if (allocation != null) {
                       assignedRackId = allocation['rackId'];
                       assignedBinId = allocation['binId'];
+                      
+                      // Populate controllers for editing
+                      _rackController.text = assignedRackId.toString();
+                      _binController.text = assignedBinId.toString();
                   }
                   isAllocating = false;
               });
@@ -175,14 +221,19 @@ class _YarnDataPageState extends State<YarnDataPage> {
       final yarnService = YarnService();
       
       final int count = int.tryParse(_countController.text) ?? 1;
+      // Get Manual Rack/Bin
+      final int? manualRack = int.tryParse(_rackController.text);
+      final int? manualBin = int.tryParse(_binController.text);
+      
+      // Use weight from controller (if valid) or fallback
       final double weight = double.tryParse(_weightController.text) ?? 25.0;
 
       // Pass the explicit bin/rack IDs if available
       String systemId = await yarnService.addYarn(
           widget.qr, 
           yarnData!, 
-          binId: assignedBinId ?? widget.binId, 
-          rackId: assignedRackId ?? widget.rackId,
+          binId: manualBin ?? assignedBinId ?? widget.binId, 
+          rackId: manualRack ?? assignedRackId ?? widget.rackId,
           count: count,
           weightOverride: weight
       );
@@ -206,6 +257,34 @@ class _YarnDataPageState extends State<YarnDataPage> {
     }
   }
 
+  Future<void> _confirmMove() async {
+      if (widget.reservedDocId == null) return;
+      setState(() => isProcessing = true);
+      try {
+          final yarnService = YarnService();
+          
+          if (widget.isDispatchMode) {
+              await yarnService.deleteReservedYarnById(widget.reservedDocId!);
+              if (!mounted) return;
+              showAck(context, 'Yarn dispatched and removed from list!');
+          } else {
+              await yarnService.updateYarnStatus(widget.reservedDocId!, 'moved');
+              if (!mounted) return;
+              showAck(context, 'Yarn successfully moved to dispatch!');
+          }
+          
+          await Future.delayed(const Duration(milliseconds: 500));
+          if (mounted) {
+               // Return success result to previous screen (Scanner) which will handle flow
+               Navigator.pop(context, true);
+          }
+      } catch (e) {
+          if (mounted) showAck(context, 'Error processing yarn: $e');
+      } finally {
+          if (mounted) setState(() => isProcessing = false);
+      }
+  }
+
 
 
   /// Navigate to QR scanner page
@@ -213,7 +292,10 @@ class _YarnDataPageState extends State<YarnDataPage> {
     Navigator.pushReplacement(
       context,
       MaterialPageRoute(
-        builder: (_) => const ScanCodePage(),
+        builder: (_) => ScanCodePage(
+            expectedQr: widget.expectedQr,
+            reservedDocId: widget.reservedDocId, // Preserve validation context
+        ),
       ),
     );
   }
@@ -305,6 +387,30 @@ class _YarnDataPageState extends State<YarnDataPage> {
       ),
       body: isLoading
           ? const Center(child: CircularProgressIndicator(color: Colors.orange))
+          : isInvalidQr 
+          ? Center(
+              child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                      const Icon(Icons.error_outline, color: Colors.red, size: 80),
+                      const SizedBox(height: 20),
+                      const Text('Invalid QR Code', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Colors.red)),
+                      const SizedBox(height: 10),
+                      Text('Expected: ${widget.expectedQr}', style: const TextStyle(fontSize: 16)),
+                      const SizedBox(height: 40),
+                      ElevatedButton.icon(
+                          onPressed: _rescan,
+                          icon: const Icon(Icons.qr_code_scanner),
+                          label: const Text('Try Again'),
+                          style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.red,
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16)
+                          ),
+                      )
+                  ]
+              )
+          )
           : yarnData == null
           ? const Center(child: Text('No Data Found'))
           : SingleChildScrollView(
@@ -390,7 +496,7 @@ class _YarnDataPageState extends State<YarnDataPage> {
                                      Text("Finding best location...", style: TextStyle(color: Colors.blue, fontStyle: FontStyle.italic))
                                  ]),
                              )
-                        else if (assignedRackId != null && assignedBinId != null)
+                         else if (assignedRackId != null && assignedBinId != null)
                              Container(
                                  margin: const EdgeInsets.only(bottom: 20),
                                  padding: const EdgeInsets.all(12),
@@ -399,11 +505,40 @@ class _YarnDataPageState extends State<YarnDataPage> {
                                      borderRadius: BorderRadius.circular(8),
                                      border: Border.all(color: Colors.blue.shade200)
                                  ),
-                                 child: Row(children: [
-                                     const Icon(Icons.check_circle, color: Colors.blue, size: 20),
-                                     const SizedBox(width: 10),
-                                     Expanded(child: Text("Starting Allocation at Rack $assignedRackId, Bin $assignedBinId", style: const TextStyle(color: Colors.blue, fontWeight: FontWeight.bold))),
-                                 ]),
+                                 child: Column(
+                                     crossAxisAlignment: CrossAxisAlignment.start,
+                                     children: [
+                                         const Text("Assigned Location (Editable)", style: TextStyle(color: Colors.blue, fontWeight: FontWeight.bold, fontSize: 12)),
+                                         const SizedBox(height: 8),
+                                         Row(children: [
+                                             Expanded(
+                                                 child: TextFormField(
+                                                     controller: _rackController,
+                                                     keyboardType: TextInputType.number,
+                                                     decoration: const InputDecoration(
+                                                         labelText: "Rack ID",
+                                                         isDense: true,
+                                                         border: OutlineInputBorder(),
+                                                         prefixIcon: Icon(Icons.grid_view, size: 18),
+                                                     ),
+                                                 ),
+                                             ),
+                                             const SizedBox(width: 12),
+                                             Expanded(
+                                                 child: TextFormField(
+                                                     controller: _binController,
+                                                     keyboardType: TextInputType.number,
+                                                     decoration: const InputDecoration(
+                                                         labelText: "Bin ID",
+                                                         isDense: true,
+                                                         border: OutlineInputBorder(),
+                                                         prefixIcon: Icon(Icons.shelves, size: 18),
+                                                     ),
+                                                 ),
+                                             ),
+                                         ]),
+                                     ]
+                                 ),
                              )
                         else
                              // Should rarely happen now with fallback logic
@@ -429,8 +564,8 @@ class _YarnDataPageState extends State<YarnDataPage> {
                     // Detailed List inside Card
                     ...yarnData!.entries
                     .where((e) => ![
-                  'notFound', 'status', 'createdAt', 'rawQr', 'qrimage',
-                  'originalQrId', 'last_state_change', 'id', 'yarnId', 'weight' // Hide weight from list to show in inputs
+                  'notfound', 'status', 'createdat', 'rawqr', 'qrimage',
+                  'originalqrid', 'last_state_change', 'id', 'yarnid', 'weight' // Lowercase check
                 ].contains(e.key.toLowerCase()))
                     .map(
                       (e) => Padding(
@@ -537,20 +672,22 @@ class _YarnDataPageState extends State<YarnDataPage> {
                   ),
                   const SizedBox(width: 16),
 
-                  // CONFIRM Button (Only in Add Mode or if action available)
-                  if (widget.isAddMode)
+                  // CONFIRM Button (Only in Add Mode or Move/Dispatch Mode)
+                  if (widget.isAddMode || widget.reservedDocId != null)
                   Expanded(
                     child: Container(
                       decoration: BoxDecoration(
-                        gradient: const LinearGradient(
-                          colors: [Colors.greenAccent, Colors.green],
+                        gradient: LinearGradient(
+                          colors: widget.reservedDocId != null 
+                             ? (widget.isDispatchMode ? [Colors.orangeAccent, Colors.deepOrange] : [Colors.blueAccent, Colors.blue])
+                             : [Colors.greenAccent, Colors.green],
                           begin: Alignment.topLeft,
                           end: Alignment.bottomRight,
                         ),
                         borderRadius: BorderRadius.circular(15),
                         boxShadow: [
                           BoxShadow(
-                            color: Colors.greenAccent.withOpacity(0.6),
+                            color: (widget.reservedDocId != null ? (widget.isDispatchMode ? Colors.orange : Colors.blue) : Colors.green).withOpacity(0.6),
                             blurRadius: 12,
                             spreadRadius: 1,
                             offset: const Offset(0, 4),
@@ -561,16 +698,18 @@ class _YarnDataPageState extends State<YarnDataPage> {
                         color: Colors.transparent,
                         child: InkWell(
                           borderRadius: BorderRadius.circular(15),
-                          onTap: _confirmYarn,
-                          child: const Padding(
-                            padding: EdgeInsets.symmetric(vertical: 14),
+                          onTap: widget.reservedDocId != null ? _confirmMove : _confirmYarn,
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 14),
                             child: Center(
                               child: Text(
-                                'Confirm Add',
-                                style: TextStyle(
+                                widget.reservedDocId != null 
+                                    ? (widget.isDispatchMode ? 'Confirm Dispatch' : 'Confirm Move') 
+                                    : 'Confirm Add',
+                                style: const TextStyle(
                                     color: Colors.white,
                                     fontWeight: FontWeight.bold,
-                                    fontSize: 16),
+                                    fontSize: 14),
                               ),
                             ),
                           ),

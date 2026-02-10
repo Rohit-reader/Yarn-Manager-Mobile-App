@@ -7,13 +7,17 @@ import './yarn_detail_page.dart';
 
 class ScanCodePage extends StatefulWidget {
   final String? expectedQr;
+  final String? reservedDocId;
   final bool isAddMode;
+  final bool isDispatchMode;
   final String? title;
 
   const ScanCodePage({
     super.key,
     this.expectedQr,
+    this.reservedDocId,
     this.isAddMode = false,
+    this.isDispatchMode = false,
     this.title,
   });
 
@@ -165,18 +169,24 @@ class _ScanCodePageState extends State<ScanCodePage>
       controller?.stop();
       setState(() => isScanning = false);
 
-      await Navigator.push(
+      final result = await Navigator.push(
           context,
           MaterialPageRoute(
             builder: (_) => YarnDataPage(
               qr: qr,
               expectedQr: widget.expectedQr,
+              reservedDocId: widget.reservedDocId,
               isAddMode: widget.isAddMode,
-                // binId: currentBinId, // Removed
-                // rackId: currentRackId, // Removed
+              isDispatchMode: widget.isDispatchMode,
             ),
           ),
       );
+
+      // If validation/move was successful in reserved/dispatch mode, close scanner too
+      if (result == true && widget.reservedDocId != null) {
+          if (mounted) Navigator.pop(context, true);
+          return;
+      }
 
       if (mounted) {
         setState(() => isScanning = true);
