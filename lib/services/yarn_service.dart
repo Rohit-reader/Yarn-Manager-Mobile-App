@@ -47,6 +47,159 @@ class YarnService {
   //     return null;
   // }
 
+  // ================= AUTO-ALLOCATION =================
+
+  /// Gets the inventory rules from Firestore
+  Future<Map<String, dynamic>> _getInventoryRules() async {
+    try {
+      final doc = await _db.collection('config').doc('inventory_rules').get();
+      if (doc.exists) {
+        final data = doc.data()!;
+        final rules = {
+          'default_weight': (data['default_weight'] is num) ? data['default_weight'].toDouble() : 25.0,
+          'max_rolls': (data['bin_capacity'] is int) ? data['bin_capacity'] : (int.tryParse(data['bin_capacity'].toString()) ?? 10),
+          'max_weight': (data['max_bin_weight'] is num) ? data['max_bin_weight'].toDouble() : 100.0,
+        };
+        print('DEBUG: Inventory Rules Loaded: $rules');
+        return rules;
+      }
+    } catch (e) {
+      print('DEBUG: Error reading config: $e');
+    }
+    return {'default_weight': 25.0, 'max_rolls': 10, 'max_weight': 100.0};
+  }
+
+  /// Finds the next available bin with sufficient capacity (Count & Weight).
+  Future<Map<String, int>?> getNextAvailableBin({int count = 1, double weightPerRoll = 25.0}) async {
+    final rules = await _getInventoryRules();
+    final int maxRolls = rules['max_rolls'];
+    final double maxBinWeight = rules['max_weight'];
+    
+    final double requiredWeight = count * weightPerRoll;
+
+    print('DEBUG: Limits -> Max Rolls: $maxRolls, Max Weight: $maxBinWeight');
+    print('DEBUG: Required -> Rolls: $count, Weight: $requiredWeight');
+    
+    int maxRackId = 0;
+    int maxBinId = 0;
+    int lastSeenRackId = 1;
+
+    // 1. Get all Racks (sorted)
+    final racksSnaps = await _db.collection('racks').orderBy('id').get();
+    
+    // FAILSAFE: If no racks exist, default to Rack 1, Bin 1
+    if (racksSnaps.docs.isEmpty) {
+        return {'rackId': 1, 'binId': 1};
+    }
+
+    for (var rackDoc in racksSnaps.docs) {
+      // Robust ID parsing
+      final data = rackDoc.data();
+      int? rackId;
+      if (data.containsKey('id') && data['id'] is int) {
+          rackId = data['id'];
+      } else {
+          rackId = int.tryParse(rackDoc.id);
+      }
+      
+      if (rackId == null) continue;
+      if (rackId > maxRackId) maxRackId = rackId;
+      lastSeenRackId = rackId;
+
+      // 2. Get all Bins for this Rack
+      // NOTE: Removed orderBy('id') here to avoid composite index error.
+      // We sort in memory instead.
+      final binsSnaps = await _db
+          .collection('bins')
+          .where('rackId', isEqualTo: rackId)
+          .get();
+      
+      final sortedBins = binsSnaps.docs.toList();
+      sortedBins.sort((a, b) {
+            final idA = (a.data().containsKey('id') && a.data()['id'] is int) ? a.data()['id'] : (int.tryParse(a.id) ?? 9999);
+            final idB = (b.data().containsKey('id') && b.data()['id'] is int) ? b.data()['id'] : (int.tryParse(b.id) ?? 9999);
+            return idA.compareTo(idB);
+      });
+      
+      // If Rack exists but has no defined bins in 'bins' collection, 
+      // we must check "Virtual Bins" starting from 1 until we find space.
+      if (sortedBins.isEmpty) {
+           print('DEBUG: Rack $rackId has no bin docs. Checking virtual bins...');
+           int vBinId = 1;
+           while (true) {
+                // Check occupancy for vBinId
+                final yarnCheck = await _checkBinCapacity(rackId, vBinId, count, requiredWeight, maxRolls, maxBinWeight);
+                if (yarnCheck) {
+                     print('DEBUG: Found space in Virtual Bin $vBinId (Rack $rackId)');
+                     return {'rackId': rackId, 'binId': vBinId};
+                }
+                
+                print('DEBUG: Virtual Bin $vBinId is FULL. Checking next...');
+                vBinId++;
+                
+                // Infinite loop guard (reasonable limit? 100?)
+                if (vBinId > 50) break; 
+           }
+           // If we exceeded logical limit for this rack, move to next rack?
+           // For now, let's just break to "Overflow" logic at end of function.
+           maxBinId = vBinId; 
+      } else {
+
+      for (var binDoc in sortedBins) {
+        final bData = binDoc.data();
+        int? binId;
+        if (bData.containsKey('id') && bData['id'] is int) {
+            binId = bData['id'];
+        } else {
+            binId = int.tryParse(binDoc.id);
+        }
+        
+        if (binId == null) continue;
+        if (binId > maxBinId) maxBinId = binId;
+
+        // 3. Check occupancy (Count & Weight)
+        // Refactored helper check
+        if (await _checkBinCapacity(rackId, binId, count, requiredWeight, maxRolls, maxBinWeight)) {
+             print('DEBUG: Found space in Rack $rackId, Bin $binId');
+             return {'rackId': rackId, 'binId': binId};
+        } else {
+             print('DEBUG: Bin $binId Full or Overweight. Checking next...');
+        }
+      }
+      } // End else
+    }
+    
+    // OVERFLOW: Create a new Bin ID in the last Rack
+    final nextBinId = maxBinId + 1;
+    print('DEBUG: All full. Overflowing to New Bin $nextBinId in Rack $lastSeenRackId');
+    return {'rackId': lastSeenRackId, 'binId': nextBinId};
+  }
+
+  /// Helper to check if a specific bin has space
+  Future<bool> _checkBinCapacity(int rackId, int binId, int count, double requiredWeight, int maxRolls, double maxBinWeight) async {
+        final yarnQuery = await _db
+            .collection('yarnRolls')
+            .where('bin', isEqualTo: 'B$binId') 
+            .get();
+        
+        final currentCount = yarnQuery.docs.length;
+        double currentTotalWeight = 0.0;
+        
+        for (var doc in yarnQuery.docs) {
+            final data = doc.data();
+            final w = data['weight'];
+            if (w is num) {
+                currentTotalWeight += w.toDouble();
+            } else if (w is String) {
+                currentTotalWeight += double.tryParse(w) ?? 0.0;
+            }
+        }
+
+        print('DEBUG: Bin $binId (Rack $rackId) -> Count: $currentCount/$maxRolls, Weight: $currentTotalWeight/$maxBinWeight');
+
+        return (currentCount + count <= maxRolls) && (currentTotalWeight + requiredWeight <= maxBinWeight);
+  }
+
   // ================= YARN OPS =================
 
   Future<DocumentSnapshot> getYarn(String qr) {
@@ -116,66 +269,84 @@ class YarnService {
 
   // ================= ADD YARN =================
 
-  Future<String> addYarn(String qr, Map<String, dynamic> data, {int? binId, int? rackId}) async {
-    try {
-      print('DEBUG: addYarn called for qr: $qr');
-      String systemId = await _generateUniqueYarnId();
-      print('DEBUG: Generated systemId: $systemId');
+  // ================= ADD YARN (BATCH SMART ALLOC) =================
 
-      final filteredData = Map<String, dynamic>.from(data);
-      filteredData.removeWhere(
-              (key, value) => value.toString().toLowerCase() == 'unknown');
+  /// Adds yarn(s) to Firestore.
+  /// Loops `count` times. For each roll, finds the next available bin sequentially.
+  Future<String> addYarn(String qr, Map<String, dynamic> data, {int? binId, int? rackId, int count = 1, double? weightOverride}) async {
+    String lastId = '';
+    
+    // We ignore the passed 'binId'/'rackId' for batch > 1 to ensure distribution logic
+    // unless count is 1, in which case we honor the override if valid.
+    
+    for (int i = 0; i < count; i++) {
+        try {
+          print('DEBUG: Processing Roll $i/$count');
+          
+          // 1. Determine Location for THIS specific roll
+          int finalRack = 1;
+          int finalBin = 1;
 
-      // Ensure bin info is stored consistently as "bin" (string)
-      String? finalBin;
-      if (binId != null) {
-        finalBin = binId.toString();
-      } else {
-        // Check if data already has bin info in various formats
-        finalBin = (filteredData['bin'] ?? filteredData['binId'] ?? filteredData['Bin'] ?? filteredData['Bin Id'])?.toString();
-      }
-      
-      // Prefix bin with 'B' if it's just a number
-      if (finalBin != null && RegExp(r'^\d+$').hasMatch(finalBin)) {
-        finalBin = 'B$finalBin';
-      }
+          // If user passed explicit single location and count is 1, use it. 
+          // But if batch, we MUST recalculate to ensure flow.
+          if (count == 1 && binId != null && rackId != null) {
+              finalRack = rackId;
+              finalBin = binId;
+          } else {
+             // Dynamic lookup
+             // Use weightOverride or rules default
+             final rules = await _getInventoryRules();
+             double w = weightOverride ?? rules['default_weight'];
+             if (data['weight'] is num) w = data['weight'].toDouble(); 
+             
+             final next = await getNextAvailableBin(count: 1, weightPerRoll: w);
+             if (next != null) {
+                 finalRack = next['rackId']!;
+                 finalBin = next['binId']!;
+             }
+          }
+          
+          String systemId = await _generateUniqueYarnId();
+          lastId = systemId; 
 
-      // Clean up redundant bin fields
-      filteredData.remove('binId');
-      filteredData.remove('Bin Id');
-      filteredData.remove('Bin');
+          final filteredData = Map<String, dynamic>.from(data);
+          filteredData.removeWhere(
+                  (key, value) => value.toString().toLowerCase() == 'unknown');
 
-      // Ensure all requested fields are present or defaulted
-      final now = DateTime.now().toUtc().toIso8601String();
+          // cleanup
+          filteredData.remove('binId'); filteredData.remove('Bin Id'); filteredData.remove('Bin');
 
-      final fullData = {
-        'lot_number': filteredData['lot_number'] ?? filteredData['Lot Number'] ?? 'LOT-GEN-${DateTime.now().millisecondsSinceEpoch.toString().substring(9)}',
-        'order_id': filteredData['order_id'] ?? filteredData['Order Id'] ?? 'ORD-NONE',
-        'supplier_name': filteredData['supplier_name'] ?? filteredData['Supplier Name'] ?? 'ABC Textiles',
-        'quality_grade': filteredData['quality_grade'] ?? filteredData['Quality Grade'] ?? 'A',
-        'weight': filteredData['weight'] ?? filteredData['Weight'] ?? 25,
-        'production_date': filteredData['production_date'] ?? filteredData['Production Date'] ?? now,
-        ...filteredData,
-        'id': systemId,
-        'originalQrId': data['id'] ?? data['yarnId'] ?? data['ID'] ?? qr.trim(),
-        'bin': finalBin ?? 'B1',
-        'state': 'IN STOCK', // Set state to "IN STOCK" as requested
-        'createdAt': now,
-        'last_state_change': now,
-        'rack_id': (rackId ?? data['rack_id'] ?? data['rackId'] ?? '1').toString(),
-      };
-      
-      fullData['rawQr'] = qr.trim();
+          final now = DateTime.now().toUtc().toIso8601String();
+          final weight = weightOverride ?? (filteredData['weight'] is num ? filteredData['weight'] : double.tryParse(filteredData['weight'].toString()) ?? 25.0);
 
-      print('DEBUG: Saving to Firestore document: $systemId in collection: yarnRolls');
-      print('DEBUG: Data payload: ${jsonEncode(fullData)}');
-       await _db.collection('yarnRolls').doc(systemId).set(fullData);
-       print('DEBUG: Firestore set SUCCESSFUL for $systemId');
-       return systemId;
-    } catch (e) {
-      print('DEBUG ERROR in addYarn: $e');
-      rethrow;
+          final fullData = {
+            'lot_number': filteredData['lot_number'] ?? 'LOT-GEN-${DateTime.now().millisecondsSinceEpoch.toString().substring(9)}',
+            'order_id': filteredData['order_id'] ?? 'ORD-NONE',
+            'supplier_name': filteredData['supplier_name'] ?? 'ABC Textiles',
+            'quality_grade': filteredData['quality_grade'] ?? 'A',
+            'weight': weight, 
+            'production_date': filteredData['production_date'] ?? now,
+            ...filteredData,
+            'id': systemId,
+            'originalQrId': data['id'] ?? data['yarnId'] ?? qr.trim(),
+            'bin': 'B$finalBin', // Enforce B prefix
+            'state': 'IN STOCK',
+            'createdAt': now,
+            'last_state_change': now,
+            'rack_id': finalRack.toString(),
+          };
+          
+          fullData['rawQr'] = qr.trim();
+
+          await _db.collection('yarnRolls').doc(systemId).set(fullData);
+          print('DEBUG: Saved Roll $i to Rack $finalRack, Bin B$finalBin');
+          
+        } catch (e) {
+          print('DEBUG ERROR in addYarn batch $i: $e');
+          rethrow;
+        }
     }
+    return lastId;
   }
 
   Future<String> _generateUniqueYarnId() async {

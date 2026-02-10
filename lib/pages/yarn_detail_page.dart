@@ -33,6 +33,15 @@ class _YarnDataPageState extends State<YarnDataPage> {
   Map<String, dynamic>? yarnData;
   bool isLoading = true;
   bool isProcessing = false;
+  
+  // Batch & Weight
+  final TextEditingController _countController = TextEditingController(text: '1');
+  final TextEditingController _weightController = TextEditingController();
+
+  // Auto-allocation state
+  int? assignedRackId;
+  int? assignedBinId;
+  bool isAllocating = false;
 
   @override
   void initState() {
@@ -53,7 +62,18 @@ class _YarnDataPageState extends State<YarnDataPage> {
               // Add temp display fields for Rack/Bin if passed
               if (widget.rackId != null) yarnData!['rack_id'] = widget.rackId;
               if (widget.binId != null) yarnData!['bin_id'] = widget.binId;
+              
+              // Pre-fill weight if available
+              if (yarnData!.containsKey('weight')) {
+                  _weightController.text = yarnData!['weight'].toString();
+              } else {
+                  // Fetch default weight
+                  _fetchDefaultWeight();
+              }
           });
+          
+          // Trigger Auto-Allocation lookup
+          _fetchAutoAllocation();
       } else {
           final doc = await yarnService.findYarnByContent(widget.qr);
           if (doc != null && doc.exists) {
@@ -65,8 +85,42 @@ class _YarnDataPageState extends State<YarnDataPage> {
     } catch (_) {
       setState(() => yarnData = {'id': widget.qr, 'error': 'Failed to fetch'});
     } finally {
-      setState(() => isLoading = false);
+      if (mounted) setState(() => isLoading = false);
     }
+  }
+
+  Future<void> _fetchDefaultWeight() async {
+      try {
+          // Quick fetch of default weight if not in QR
+           final doc = await FirebaseFirestore.instance.collection('config').doc('inventory_rules').get();
+           if (doc.exists && mounted && _weightController.text.isEmpty) {
+               _weightController.text = (doc.data()?['default_weight'] ?? 25.0).toString();
+           }
+      } catch (_) {}
+  }
+
+  Future<void> _fetchAutoAllocation() async {
+      setState(() => isAllocating = true);
+      try {
+          final yarnService = YarnService();
+          final int count = int.tryParse(_countController.text) ?? 1;
+          final double weight = double.tryParse(_weightController.text) ?? 25.0;
+
+          final allocation = await yarnService.getNextAvailableBin(count: count, weightPerRoll: weight);
+          
+          if (mounted) {
+              setState(() {
+                  if (allocation != null) {
+                      assignedRackId = allocation['rackId'];
+                      assignedBinId = allocation['binId'];
+                  }
+                  isAllocating = false;
+              });
+          }
+      } catch (e) {
+          if (mounted) setState(() => isAllocating = false);
+          print('Error allocating: $e');
+      }
   }
 
   String _capitalize(String s) {
@@ -120,18 +174,23 @@ class _YarnDataPageState extends State<YarnDataPage> {
     try {
       final yarnService = YarnService();
       
+      final int count = int.tryParse(_countController.text) ?? 1;
+      final double weight = double.tryParse(_weightController.text) ?? 25.0;
+
       // Pass the explicit bin/rack IDs if available
       String systemId = await yarnService.addYarn(
           widget.qr, 
           yarnData!, 
-          binId: widget.binId, 
-          rackId: widget.rackId
+          binId: assignedBinId ?? widget.binId, 
+          rackId: assignedRackId ?? widget.rackId,
+          count: count,
+          weightOverride: weight
       );
 
       if (!mounted) return;
 
       // Show acknowledgment
-      showAck(context, 'Yarn confirmed successfully!');
+      showAck(context, 'Success! $count rolls added.');
       
       // Navigate after close
       if (mounted) {
@@ -319,6 +378,51 @@ class _YarnDataPageState extends State<YarnDataPage> {
                       ],
                     ),
                     const SizedBox(height: 24),
+                    
+                    // Auto-Allocation Display
+                    if (widget.isAddMode) ...[
+                        if (isAllocating)
+                             const Padding(
+                                 padding: EdgeInsets.only(bottom: 20),
+                                 child: Row(children: [
+                                     SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+                                     SizedBox(width: 10),
+                                     Text("Finding best location...", style: TextStyle(color: Colors.blue, fontStyle: FontStyle.italic))
+                                 ]),
+                             )
+                        else if (assignedRackId != null && assignedBinId != null)
+                             Container(
+                                 margin: const EdgeInsets.only(bottom: 20),
+                                 padding: const EdgeInsets.all(12),
+                                 decoration: BoxDecoration(
+                                     color: Colors.blue.shade50,
+                                     borderRadius: BorderRadius.circular(8),
+                                     border: Border.all(color: Colors.blue.shade200)
+                                 ),
+                                 child: Row(children: [
+                                     const Icon(Icons.check_circle, color: Colors.blue, size: 20),
+                                     const SizedBox(width: 10),
+                                     Expanded(child: Text("Starting Allocation at Rack $assignedRackId, Bin $assignedBinId", style: const TextStyle(color: Colors.blue, fontWeight: FontWeight.bold))),
+                                 ]),
+                             )
+                        else
+                             // Should rarely happen now with fallback logic
+                             Container(
+                                 margin: const EdgeInsets.only(bottom: 20),
+                                 padding: const EdgeInsets.all(12),
+                                 decoration: BoxDecoration(
+                                     color: Colors.blue.shade50,
+                                     borderRadius: BorderRadius.circular(8),
+                                     border: Border.all(color: Colors.blue.shade200)
+                                 ),
+                                 child: const Row(children: [
+                                     Icon(Icons.info, color: Colors.blue, size: 20),
+                                     const SizedBox(width: 10),
+                                     Expanded(child: Text("Defaulting to Rack 1, Bin 1", style: TextStyle(color: Colors.blue, fontWeight: FontWeight.bold))),
+                                 ]),
+                             ),
+                    ],
+
                     const Divider(height: 1),
                     const SizedBox(height: 16),
                     
@@ -326,7 +430,7 @@ class _YarnDataPageState extends State<YarnDataPage> {
                     ...yarnData!.entries
                     .where((e) => ![
                   'notFound', 'status', 'createdAt', 'rawQr', 'qrimage',
-                  'originalQrId', 'last_state_change', 'id', 'yarnId'
+                  'originalQrId', 'last_state_change', 'id', 'yarnId', 'weight' // Hide weight from list to show in inputs
                 ].contains(e.key.toLowerCase()))
                     .map(
                       (e) => Padding(
@@ -355,6 +459,28 @@ class _YarnDataPageState extends State<YarnDataPage> {
                         ),
                       ),
                     ).toList(),
+                    
+                    if (widget.isAddMode) ...[
+                        const Divider(height: 30),
+                        const Text("Batch Inventory Details", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                        const SizedBox(height: 16),
+                        Row(
+                            children: [
+                                Expanded(
+                                    child: TextFormField(
+                                        controller: _countController,
+                                        keyboardType: TextInputType.number,
+                                        decoration: const InputDecoration(
+                                            labelText: "Count",
+                                            border: OutlineInputBorder(),
+                                            contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 8)
+                                        ),
+                                        onChanged: (_) => _fetchAutoAllocation(),
+                                    ),
+                                ),
+                            ],
+                        ),
+                    ],
                 ],
               ),
             ),

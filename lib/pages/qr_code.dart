@@ -28,9 +28,7 @@ class _ScanCodePageState extends State<ScanCodePage>
   bool isScanning = true;
   bool isProcessing = false;
   
-  // Rack/Bin Flow State
-  int? currentRackId;
-  int? currentBinId;
+  // Rack/Bin Flow State REMOVED
   
   late AnimationController animationController;
   late Animation<double> laserAnimation;
@@ -88,20 +86,9 @@ class _ScanCodePageState extends State<ScanCodePage>
     setState(() => isProcessing = true);
 
     try {
-        if (widget.isAddMode) {
-            // Attempt to identify as Rack or Bin first
-            final rackId = _tryParseRackId(qrData);
-            if (rackId != null) {
-                await _processRackAction(rackId);
-                return;
-            }
-
-            final binId = _tryParseBinId(qrData);
-            if (binId != null) {
-                await _processBinAction(binId);
-                return;
-            }
-        }
+        // if (widget.isAddMode) {
+        //     // Auto-allocation is now handled in the confirmation step
+        // }
         
         // Fallback: Treat as Yarn Scan
         await _processYarnScan(qrData);
@@ -162,32 +149,7 @@ class _ScanCodePageState extends State<ScanCodePage>
   }
 
   // --- Actions ---
-
-  Future<void> _processRackAction(int id) async {
-      await _yarnService.createRack(id);
-      setState(() {
-        currentRackId = id;
-        currentBinId = null; 
-      });
-      _showToast('✅ Rack $id Selected', isError: false);
-  }
-
-  Future<void> _processBinAction(int id) async {
-      if (currentRackId == null) {
-          _showToast('⚠️ Scan a Rack first!', isError: true);
-          return;
-      }
-      
-      try {
-         await _yarnService.linkBinToRack(id, currentRackId!);
-         setState(() {
-            currentBinId = id;
-         });
-         _showToast('✅ Bin $id linked to Rack $currentRackId', isError: false);
-      } catch(e) {
-         _showToast('Error linking bin: $e', isError: true);
-      }
-  }
+  // Rack/Bin actions removed for auto-allocation flow
 
   dynamic _safeJsonDecode(String input) {
       try {
@@ -210,8 +172,8 @@ class _ScanCodePageState extends State<ScanCodePage>
               qr: qr,
               expectedQr: widget.expectedQr,
               isAddMode: widget.isAddMode,
-                binId: currentBinId,
-                rackId: currentRackId,
+                // binId: currentBinId, // Removed
+                // rackId: currentRackId, // Removed
             ),
           ),
       );
@@ -352,42 +314,9 @@ class _ScanCodePageState extends State<ScanCodePage>
           child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                  // Current Context
-                  Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceAround,
-                      children: [
-                          _infoChip('Rack', currentRackId?.toString() ?? 'None', Icons.grid_view, currentRackId != null),
-                          Container(width: 1, height: 40, color: Colors.grey.shade300),
-                          _infoChip('Bin', currentBinId?.toString() ?? 'None', Icons.inventory_2, currentBinId != null),
-                      ],
-                  ),
-                  const SizedBox(height: 20),
-                  // Instructions / Status
-                  if (currentRackId == null)
-                       const Text('Scan a Rack QR (Rack : 1)', style: TextStyle(color: Colors.grey, fontSize: 16)),
-                  if (currentRackId != null && currentBinId == null)
-                       const Text('Scan a Bin QR (Bin : 5)', style: TextStyle(color: Colors.blue, fontWeight: FontWeight.bold, fontSize: 16)),
-                  if (currentRackId != null && currentBinId != null)
-                       const Text('Scan Yarn to Add to Bin', style: TextStyle(color: Colors.green, fontWeight: FontWeight.bold, fontSize: 16)),
-
-                  const SizedBox(height: 10),
-                  
-                  // Helper Manual Buttons? 
-                  // "Display option '+ Add Rack'"
-                  if (currentRackId == null)
-                      SizedBox(
-                          width: double.infinity,
-                          child: ElevatedButton.icon(
-                              icon: const Icon(Icons.qr_code),
-                              label: const Text('Scan Rack QR Code'),
-                              style: ElevatedButton.styleFrom(
-                                  backgroundColor: Colors.blueAccent,
-                                  foregroundColor: Colors.white,
-                                  padding: const EdgeInsets.symmetric(vertical: 12)
-                              ),
-                              onPressed: () {}, // Handled by scan, this is just visual cue mostly? Or we could pop manual input dialog?
-                          ),
-                      ),
+                  const Text('Scan Yarn QR Code', style: TextStyle(color: Colors.blue, fontWeight: FontWeight.bold, fontSize: 18)),
+                  const SizedBox(height: 8),
+                  const Text('Location will be auto-assigned.', style: TextStyle(color: Colors.grey, fontSize: 14)),
               ],
           ),
       );

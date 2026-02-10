@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:qr_reader/pages/qr_code.dart';
+import 'package:qr_reader/pages/settings_page.dart'; // Import
 import 'package:shimmer/shimmer.dart';
 
 class MainPage extends StatefulWidget {
@@ -23,13 +24,23 @@ class _MainPageState extends State<MainPage> {
 
   @override
   Widget build(BuildContext context) {
-    return SafeArea(child: Scaffold(
-      appBar: AppBar(title: const Text('Yarn Scanner')),
-      body: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-        child: _isLoading ? _shimmerLoader() : _mainContent(context),
+    return SafeArea(
+      child: Scaffold(
+        appBar: AppBar(
+            title: const Text('Yarn Scanner'),
+            actions: [
+                IconButton(
+                    icon: const Icon(Icons.settings),
+                    onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const SettingsPage())),
+                )
+            ],
+        ),
+        body: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+          child: _isLoading ? _shimmerLoader() : _mainContent(context),
+        ),
       ),
-    ));
+    );
   }
 
   Widget _mainContent(BuildContext context) {
@@ -43,7 +54,7 @@ class _MainPageState extends State<MainPage> {
         Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            _fancyCard(
+             _fancyCard(
               context,
               title: 'Reserved List',
               subtitle: 'Move yarn from rack to floor',
@@ -84,20 +95,20 @@ class _MainPageState extends State<MainPage> {
         Text(
           '© 2026 Yarn Scanner. All rights reserved.',
           style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
-          textAlign: TextAlign.center
+          textAlign: TextAlign.center,
         ),
       ],
     );
   }
 
   Widget _fancyCard(
-      BuildContext context, {
-        required String title,
-        required String subtitle,
-        required IconData icon,
-        required List<Color> colors,
-        required VoidCallback onTap,
-      }) {
+    BuildContext context, {
+    required String title,
+    required String subtitle,
+    required IconData icon,
+    required List<Color> colors,
+    required VoidCallback onTap,
+  }) {
     return GestureDetector(
       onTap: onTap,
       child: Stack(
@@ -135,14 +146,19 @@ class _MainPageState extends State<MainPage> {
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Text(title,
-                    style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 24,
-                        fontWeight: FontWeight.bold)),
+                Text(
+                  title,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 24,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
                 const SizedBox(height: 6),
-                Text(subtitle,
-                    style: const TextStyle(color: Colors.white70, fontSize: 15)),
+                Text(
+                  subtitle,
+                  style: const TextStyle(color: Colors.white70, fontSize: 15),
+                ),
               ],
             ),
           ),
