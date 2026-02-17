@@ -56,9 +56,9 @@ class YarnService {
       if (doc.exists) {
         final data = doc.data()!;
         final rules = {
-          'default_weight': (data['default_weight'] is num) ? data['default_weight'].toDouble() : 25.0,
           'max_rolls': (data['bin_capacity'] is int) ? data['bin_capacity'] : (int.tryParse(data['bin_capacity'].toString()) ?? 10),
-          'max_weight': (data['max_bin_weight'] is num) ? data['max_bin_weight'].toDouble() : 100.0,
+          'max_weight': (data['max_bin_weight'] is num) ? data['max_bin_weight'].toDouble() : 500.0,
+          'max_bins': (data['max_bins'] is int) ? data['max_bins'] : (int.tryParse(data['max_bins'].toString()) ?? 50),
         };
         print('DEBUG: Inventory Rules Loaded: $rules');
         return rules;
@@ -66,152 +66,105 @@ class YarnService {
     } catch (e) {
       print('DEBUG: Error reading config: $e');
     }
-    return {'default_weight': 25.0, 'max_rolls': 10, 'max_weight': 100.0};
+    return {'max_rolls': 10, 'max_weight': 500.0, 'max_bins': 50};
   }
 
   /// Finds the next available bin with sufficient capacity (Count & Weight).
   /// [minRackId] and [minBinId] restrict the search to monotonic increasing locations.
+  /// [localOccupancy] is an optional map to track "theoretical" capacity during a batch.
   Future<Map<String, int>?> getNextAvailableBin({
       int count = 1, 
       double weightPerRoll = 25.0,
       int minRackId = 1,
-      int minBinId = 1
+      int minBinId = 1,
+      Map<String, Map<String, dynamic>>? localOccupancy,
+      Map<String, Map<String, Map<String, dynamic>>>? rackOccupancyCache
   }) async {
     final rules = await _getInventoryRules();
     final int maxRolls = rules['max_rolls'];
     final double maxBinWeight = rules['max_weight'];
+    final int maxBinsPerRack = rules['max_bins'];
     
     final double requiredWeight = count * weightPerRoll;
     
-    int maxRackId = 0;
-    int maxBinId = 0;
-    int lastSeenRackId = 1;
+    // We search through racks starting from minRackId
+    // We search up to a reasonable limit or until we find space
+    for (int rId = minRackId; rId <= (minRackId + 50); rId++) {
+        
+        // Use cache if available to avoid redundant DB hits in batch
+        Map<String, Map<String, dynamic>> rackOccupancy;
+        if (rackOccupancyCache != null && rackOccupancyCache.containsKey(rId.toString())) {
+            rackOccupancy = rackOccupancyCache[rId.toString()]!;
+        } else {
+            rackOccupancy = await _getRackOccupancy(rId.toString());
+            rackOccupancyCache?[rId.toString()] = rackOccupancy;
+        }
 
-    // 1. Get all Racks (sorted)
-    final racksSnaps = await _db.collection('racks').orderBy('id').get();
-    
-    // FAILSAFE: If no racks exist, default to Rack 1, Bin 1
-    if (racksSnaps.docs.isEmpty) {
-        return {'rackId': 1, 'binId': 1};
-    }
+        int vBinId = (rId == minRackId) ? minBinId : 1;
 
-    for (var rackDoc in racksSnaps.docs) {
-      // Robust ID parsing
-      final data = rackDoc.data();
-      int? rackId;
-      if (data.containsKey('id') && data['id'] is int) {
-          rackId = data['id'];
-      } else {
-          rackId = int.tryParse(rackDoc.id);
-      }
-      
-      if (rackId == null) continue;
-      
-      // Skip Racks below minRackId
-      if (rackId < minRackId) continue;
-      
-      if (rackId > maxRackId) maxRackId = rackId;
-      lastSeenRackId = rackId; 
-      
-      // ... rest of logic
+        // Search up to maxBinsPerRack per rack
+        for (int bId = vBinId; bId <= maxBinsPerRack; bId++) {
+            // Normalize binKey to match what's in occupancy map (B1, B2, etc.)
+            final binKey = 'B$bId';
+            
+            // Get current DB usage. We check for 'B1' and '1' and 'Bin 1' variations
+            int currentCount = 0;
+            double currentWeight = 0.0;
 
-      // 2. Get all Bins for this Rack
-      // NOTE: Removed orderBy('id') here to avoid composite index error.
-      // We sort in memory instead.
-      final binsSnaps = await _db
-          .collection('bins')
-          .where('rackId', isEqualTo: rackId)
-          .get();
-      
-      final sortedBins = binsSnaps.docs.toList();
-      sortedBins.sort((a, b) {
-            final idA = (a.data().containsKey('id') && a.data()['id'] is int) ? a.data()['id'] : (int.tryParse(a.id) ?? 9999);
-            final idB = (b.data().containsKey('id') && b.data()['id'] is int) ? b.data()['id'] : (int.tryParse(b.id) ?? 9999);
-            return idA.compareTo(idB);
-      });
-      
-      // If Rack exists but has no defined bins in 'bins' collection, 
-      // we must check "Virtual Bins" starting from 1 until we find space.
-      if (sortedBins.isEmpty) {
-           print('DEBUG: Rack $rackId has no bin docs. Checking virtual bins...');
-           int vBinId = 1;
-           while (true) {
-                // Check occupancy for vBinId
-                final yarnCheck = await _checkBinCapacity(rackId, vBinId, count, requiredWeight, maxRolls, maxBinWeight);
-                if (yarnCheck) {
-                     print('DEBUG: Found space in Virtual Bin $vBinId (Rack $rackId)');
-                     return {'rackId': rackId, 'binId': vBinId};
+            if (rackOccupancy.containsKey(binKey)) {
+                currentCount = rackOccupancy[binKey]?['count'] ?? 0;
+                currentWeight = (rackOccupancy[binKey]?['weight'] ?? 0.0).toDouble();
+            } else if (rackOccupancy.containsKey(bId.toString())) {
+                currentCount = rackOccupancy[bId.toString()]?['count'] ?? 0;
+                currentWeight = (rackOccupancy[bId.toString()]?['weight'] ?? 0.0).toDouble();
+            } else if (rackOccupancy.containsKey('Bin $bId')) {
+                currentCount = rackOccupancy['Bin $bId']?['count'] ?? 0;
+                currentWeight = (rackOccupancy['Bin $bId']?['weight'] ?? 0.0).toDouble();
+            }
+
+            // Apply local offsets (from current batch calculation)
+            if (localOccupancy != null) {
+                final localKey = '$rId-$bId';
+                if (localOccupancy.containsKey(localKey)) {
+                    currentCount += (localOccupancy[localKey]!['count'] as int);
+                    currentWeight += (localOccupancy[localKey]!['weight'] as double);
                 }
-                
-                print('DEBUG: Virtual Bin $vBinId is FULL. Checking next...');
-                vBinId++;
-                
-                // Infinite loop guard (reasonable limit? 100?)
-                if (vBinId > 50) break; 
-           }
-           // If we exceeded logical limit for this rack, move to next rack?
-           // For now, let's just break to "Overflow" logic at end of function.
-           maxBinId = vBinId; 
-      } else {
+            }
 
-      for (var binDoc in sortedBins) {
-        final bData = binDoc.data();
-        int? binId;
-        if (bData.containsKey('id') && bData['id'] is int) {
-            binId = bData['id'];
-        } else {
-            binId = int.tryParse(binDoc.id);
-        }
-        
-        if (binId == null) continue;
-        
-        // Skip Bins below minBinId ONLY if we are in the minRack
-        if (rackId == minRackId && binId < minBinId) continue;
-        
-        if (binId > maxBinId) maxBinId = binId;
-
-        // 3. Check occupancy (Count & Weight)
-        // Refactored helper check
-        if (await _checkBinCapacity(rackId, binId, count, requiredWeight, maxRolls, maxBinWeight)) {
-             print('DEBUG: Found space in Rack $rackId, Bin $binId');
-             return {'rackId': rackId, 'binId': binId};
-        } else {
-             print('DEBUG: Bin $binId Full or Overweight. Checking next...');
-        }
-      }
-      } // End else
-    }
-    
-    // OVERFLOW: Create a new Bin ID in the last Rack
-    final nextBinId = maxBinId + 1;
-    print('DEBUG: All full. Overflowing to New Bin $nextBinId in Rack $lastSeenRackId');
-    return {'rackId': lastSeenRackId, 'binId': nextBinId};
-  }
-
-  /// Helper to check if a specific bin has space
-  Future<bool> _checkBinCapacity(int rackId, int binId, int count, double requiredWeight, int maxRolls, double maxBinWeight) async {
-        final yarnQuery = await _db
-            .collection('yarnRolls')
-            .where('bin', isEqualTo: 'B$binId') 
-            .get();
-        
-        final currentCount = yarnQuery.docs.length;
-        double currentTotalWeight = 0.0;
-        
-        for (var doc in yarnQuery.docs) {
-            final data = doc.data();
-            final w = data['weight'];
-            if (w is num) {
-                currentTotalWeight += w.toDouble();
-            } else if (w is String) {
-                currentTotalWeight += double.tryParse(w) ?? 0.0;
+            if ((currentCount + count <= maxRolls) && (currentWeight + requiredWeight <= maxBinWeight)) {
+                print('DEBUG: Found space in Rack $rId, Bin $bId (Occupancy: $currentCount rolls)');
+                return {'rackId': rId, 'binId': bId};
             }
         }
+    }
 
-        print('DEBUG: Bin $binId (Rack $rackId) -> Count: $currentCount/$maxRolls, Weight: $currentTotalWeight/$maxBinWeight');
-
-        return (currentCount + count <= maxRolls) && (currentTotalWeight + requiredWeight <= maxBinWeight);
+    return null; // Return null if no space found after searching
   }
+
+  /// Helper to get counts and weights for all bins in a rack in ONE query
+  Future<Map<String, Map<String, dynamic>>> _getRackOccupancy(String rackId) async {
+      final snap = await _db.collection('yarnRolls')
+          .where('rack_id', isEqualTo: rackId)
+          .where('state', whereIn: ['IN STOCK', 'RESERVED', 'MOVED', 'waiting for dispatch', 'reserved', 'moved', 'WAITING FOR DISPATCH']) 
+          .get();
+      
+      final Map<String, Map<String, dynamic>> occupancy = {};
+      
+      for (var doc in snap.docs) {
+          final data = doc.data();
+          final bin = data['bin']?.toString() ?? 'Unknown';
+          final weight = (data['weight'] is num) ? data['weight'].toDouble() : 0.0;
+          
+          if (!occupancy.containsKey(bin)) {
+              occupancy[bin] = {'count': 0, 'weight': 0.0};
+          }
+          
+          occupancy[bin]!['count'] = (occupancy[bin]!['count'] as int) + 1;
+          occupancy[bin]!['weight'] = (occupancy[bin]!['weight'] as double) + weight;
+      }
+      return occupancy;
+  }
+
 
   // ================= YARN OPS =================
 
@@ -265,7 +218,7 @@ class YarnService {
   Stream<QuerySnapshot> getMovedYarns() {
     return _db
         .collection('reserved_collection')
-        .where('state', whereIn: ['moved', 'MOVED'])
+        .where('state', whereIn: ['moved', 'MOVED', 'waiting for dispatch'])
         .snapshots();
   }
 
@@ -273,6 +226,13 @@ class YarnService {
     return _db.collection('reserved_collection').doc(docId).update({
       'state': newStatus,
       'updatedAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  Future<void> updateYarnRollStatus(String docId, String newStatus) {
+    return _db.collection('yarnRolls').doc(docId).update({
+      'state': newStatus,
+      'last_state_change': DateTime.now().toUtc().toIso8601String(),
     });
   }
 
@@ -286,104 +246,121 @@ class YarnService {
 
   /// Adds yarn(s) to Firestore.
   /// Loops `count` times. For each roll, finds the next available bin sequentially.
+  /// Uses a local occupancy map to prevent race conditions during batch processing.
   Future<String> addYarn(String qr, Map<String, dynamic> data, {int? binId, int? rackId, int count = 1, double? weightOverride}) async {
-    String lastId = '';
+    final batch = _db.batch();
+    final rules = await _getInventoryRules();
     
-    // We maintain a "pointer" to the current best bin
-    // initialized with the passed manual overrides or defaults.
-    int currentRack = rackId ?? 1;
-    int currentBin = binId ?? 1;
+    // Local tracking to avoid race conditions during the loop
+    final Map<String, Map<String, dynamic>> localOccupancy = {};
+    // Performance optimization: cache rack data within THIS batch session
+    final Map<String, Map<String, Map<String, dynamic>>> rackOccupancyCache = {};
     
-    for (int i = 0; i < count; i++) {
-        try {
-          print('DEBUG: Processing Roll $i/$count');
-          
-          // Dynamic lookup: Check if current pointer is valid or needs to move forward
-          final rules = await _getInventoryRules();
-          double w = weightOverride ?? rules['default_weight'];
-          if (data['weight'] is num) w = data['weight'].toDouble(); 
-          
-          // Check capacity of CURRENT pointer specifically
-          bool fitsInCurrent = await _checkBinCapacity(
-              currentRack, currentBin, 1, w, 
-              rules['max_rolls'], rules['max_weight']
-          );
-          
-          if (!fitsInCurrent) {
-               // Must find NEXT available bin, starting search strictly AFTER current
-               // Actually, search inclusive from current? No, we know current failed.
-               // Search from currentRack, currentBin + 1?
-               // But minBinId logic in check is inclusive.
-               // So let's ask for next available starting from current.
-               // If it returns same bin, we're stuck? 
-               // Wait, `getNextAvailableBin` checks capacity. So if current is full, it WONT return it.
-               
-               print('DEBUG: Bin $currentBin (Rack $currentRack) full/invalid. Searching forward...');
-               final next = await getNextAvailableBin(
-                   count: 1, 
-                   weightPerRoll: w,
-                   minRackId: currentRack,
-                   minBinId: currentBin
-               );
-               
-               if (next != null) {
-                   currentRack = next['rackId']!;
-                   currentBin = next['binId']!;
-               } else {
-                   // Overflow logic is inside getNext... so this implies major failure
-                   // Fallback to purely incrementing bin ID if needed
-                   currentBin++; 
-               }
-          }
-          
-          // At this point, currentRack/currentBin *should* be valid
-          
-          String systemId = await _generateUniqueYarnId();
-          lastId = systemId; 
-          
-          // ... rest of save logic ...
-          final filteredData = Map<String, dynamic>.from(data);
-          filteredData.removeWhere(
-                  (key, value) => value.toString().toLowerCase() == 'unknown');
+    // Initial pointer for the WHOLE batch
+    final int startRack = rackId ?? 1;
+    final int startBin = binId ?? 1;
 
-          // cleanup
-          filteredData.remove('binId'); filteredData.remove('Bin Id'); filteredData.remove('Bin');
+    // === NEW: MANUAL OVERRIDE SAFETY CHECK ===
+    // If a specific bin was requested, ensure it has room for AT LEAST the first roll.
+    // This prevents entering a 'full' bin manually.
+    if (binId != null && rackId != null) {
+        final rackOccupancy = await _getRackOccupancy(rackId.toString());
+        final binKey = 'B$binId';
+        final int currentCount = rackOccupancy[binKey]?['count'] ?? 0;
+        final double currentWeight = (rackOccupancy[binKey]?['weight'] ?? 0.0).toDouble();
+        final double w1 = weightOverride ?? (data['weight'] is num ? data['weight'].toDouble() : rules['default_weight']);
 
-          final now = DateTime.now().toUtc().toIso8601String();
-          final weight = weightOverride ?? (filteredData['weight'] is num ? filteredData['weight'] : double.tryParse(filteredData['weight'].toString()) ?? 25.0);
-
-          final fullData = {
-            'lot_number': filteredData['lot_number'] ?? 'LOT-GEN-${DateTime.now().millisecondsSinceEpoch.toString().substring(9)}',
-            'order_id': filteredData['order_id'] ?? 'ORD-NONE',
-            'supplier_name': filteredData['supplier_name'] ?? 'ABC Textiles',
-            'quality_grade': filteredData['quality_grade'] ?? 'A',
-            'weight': weight, 
-            'production_date': filteredData['production_date'] ?? now,
-            ...filteredData,
-            'id': systemId,
-            'originalQrId': data['id'] ?? data['yarnId'] ?? qr.trim(),
-            'bin': 'B$currentBin', // Enforce B prefix
-            'state': 'IN STOCK',
-            'createdAt': now,
-            'last_state_change': now,
-            'rack_id': currentRack.toString(),
-          };
-          
-          fullData['rawQr'] = qr.trim();
-
-          await _db.collection('yarnRolls').doc(systemId).set(fullData);
-          print('DEBUG: Saved Roll $i to Rack $currentRack, Bin B$currentBin');
-          
-        } catch (e) {
-          print('DEBUG ERROR in addYarn batch $i: $e');
-          rethrow;
+        if (currentCount >= rules['max_rolls']) {
+            throw Exception("No space in Bin $binId (Capacity: ${rules['max_rolls']} rolls reached)");
+        }
+        if (currentWeight + w1 > rules['max_weight']) {
+            throw Exception("No space in Bin $binId (Weight limit: ${rules['max_weight']}kg reached)");
+        }
+        if (binId > rules['max_bins'] && rackId == 1) { // Apply limit check
+            throw Exception("Invalid Bin: Rack $rackId only supports up to ${rules['max_bins']} bins.");
+        }
+        // General limit check for any rack
+        if (binId > rules['max_bins']) {
+            throw Exception("Bin $binId exceeds the maximum allowed bins per rack (${rules['max_bins']})");
         }
     }
-    return lastId;
+
+    // Prefetch starting IDs
+    final nextIds = await _generateUniqueYarnIds(count);
+    
+    for (int i = 0; i < count; i++) {
+        double? w = weightOverride;
+        if (data['weight'] is num) w = data['weight'].toDouble(); 
+        
+        if (w == null) throw Exception("Weight is missing for roll ${i+1}. Every roll must have a weight.");
+
+        // Find best bin for THIS roll, ALWAYS searching from the START of the sequence 
+        // to catch any holes created by partial bins or manual edits.
+        final allocation = await getNextAvailableBin(
+            count: 1, 
+            weightPerRoll: w,
+            minRackId: startRack,
+            minBinId: startBin,
+            localOccupancy: localOccupancy,
+            rackOccupancyCache: rackOccupancyCache
+        );
+
+        int currentRack;
+        int currentBin;
+
+        if (allocation != null) {
+            currentRack = allocation['rackId']!;
+            currentBin = allocation['binId']!;
+        } else {
+            // This should only happen if warehouse is completely full
+            throw Exception("Warehouse Capacity Exhausted: No space found after Rack $startRack Bin $startBin");
+        }
+
+        // Update local occupancy for subsequent rolls in this loop
+        final localKey = '$currentRack-$currentBin';
+        if (!localOccupancy.containsKey(localKey)) {
+            localOccupancy[localKey] = {'count': 0, 'weight': 0.0};
+        }
+        localOccupancy[localKey]!['count'] = (localOccupancy[localKey]!['count'] as int) + 1;
+        localOccupancy[localKey]!['weight'] = (localOccupancy[localKey]!['weight'] as double) + w;
+
+        // Prepare data
+        final systemId = nextIds[i];
+        final filteredData = Map<String, dynamic>.from(data);
+        filteredData.removeWhere((k, v) => v.toString().toLowerCase() == 'unknown');
+        filteredData.remove('binId'); filteredData.remove('Bin Id'); filteredData.remove('Bin');
+
+        final now = DateTime.now().toUtc().toIso8601String();
+        final fullData = {
+          'lot_number': filteredData['lot_number'] ?? 'LOT-GEN-${DateTime.now().millisecondsSinceEpoch.toString().substring(9)}',
+          'order_id': filteredData['order_id'] ?? 'ORD-NONE',
+          'supplier_name': filteredData['supplier_name'] ?? 'ABC Textiles',
+          'quality_grade': filteredData['quality_grade'] ?? 'A',
+          'weight': w, 
+          'production_date': filteredData['production_date'] ?? now,
+          ...filteredData,
+          'id': systemId,
+          'originalQrId': data['id'] ?? data['yarnId'] ?? qr.trim(),
+          'bin': 'B$currentBin',
+          'state': 'IN STOCK',
+          'createdAt': now,
+          'last_state_change': now,
+          'rack_id': currentRack.toString(),
+          'rawQr': qr.trim(),
+        };
+
+        batch.set(_db.collection('yarnRolls').doc(systemId), fullData);
+        print('DEBUG: Added Roll ${i+1}/$count to Batch (Rack $currentRack, Bin B$currentBin)');
+    }
+
+    await batch.commit();
+    return nextIds.last;
   }
 
-  Future<String> _generateUniqueYarnId() async {
+  Future<List<String>> _generateUniqueYarnIds(int count) async {
     final year = DateTime.now().year.toString();
+    int lastNum = 0;
+
     try {
       final snapshot = await _db
           .collection('yarnRolls')
@@ -391,28 +368,22 @@ class YarnService {
           .limit(1)
           .get();
 
-      if (snapshot.docs.isEmpty) {
-        print('DEBUG: No existing yarns found, starting with 001');
-        return 'YR-$year-001';
+      if (snapshot.docs.isNotEmpty) {
+        final lastId = snapshot.docs.first.get('id') as String;
+        final parts = lastId.split('-');
+        if (parts.length >= 3) {
+            lastNum = int.tryParse(parts.last) ?? 0;
+        } else if (parts.length == 2) {
+            lastNum = int.tryParse(parts.last) ?? 0;
+        }
       }
-
-      final lastId = snapshot.docs.first.get('id') as String;
-      print('DEBUG: Last ID in DB: $lastId');
-      final parts = lastId.split('-');
-      int lastNum = 0;
-      if (parts.length >= 3) {
-          lastNum = int.tryParse(parts.last) ?? 0;
-      } else if (parts.length == 2) {
-          lastNum = int.tryParse(parts.last) ?? 0;
-      }
-      
-      final nextNum = lastNum + 1;
-      return 'YR-$year-$nextNum';
     } catch (e) {
-      print('DEBUG ERROR in _generateUniqueYarnId: $e');
-      return 'YR-$year-${DateTime.now().millisecondsSinceEpoch.toString().substring(10)}';
+      print('DEBUG ERROR in ID generation pre-fetch: $e');
     }
+
+    return List.generate(count, (i) => 'YR-$year-${lastNum + i + 1}');
   }
+
 
   /// ✅ UPDATED parseYarnData TO RETURN READABLE FIELDS
   Map<String, dynamic> parseYarnData(String qr) {

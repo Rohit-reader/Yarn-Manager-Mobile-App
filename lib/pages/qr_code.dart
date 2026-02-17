@@ -63,7 +63,7 @@ class _ScanCodePageState extends State<ScanCodePage>
 
   void _startIdleTimer() {
     idleTimer?.cancel();
-    idleTimer = Timer(const Duration(seconds: 15), () {
+    idleTimer = Timer(const Duration(seconds: 60), () {
       if (mounted) Navigator.pop(context);
     });
   }
@@ -169,6 +169,7 @@ class _ScanCodePageState extends State<ScanCodePage>
       controller?.stop();
       setState(() => isScanning = false);
 
+      idleTimer?.cancel(); // Cancel timer while user is viewing details
       final result = await Navigator.push(
           context,
           MaterialPageRoute(

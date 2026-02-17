@@ -12,12 +12,14 @@ class _SettingsPageState extends State<SettingsPage> {
   final _formKey = GlobalKey<FormState>();
   final _db = FirebaseFirestore.instance;
 
-  final TextEditingController _defaultWeightController = TextEditingController();
   final TextEditingController _maxRollsController = TextEditingController();
   final TextEditingController _maxWeightController = TextEditingController();
+  final TextEditingController _maxBinsController = TextEditingController();
 
   bool _isLoading = true;
   bool _isSaving = false;
+  int _initialMaxRolls = 0;
+  int _initialMaxBins = 0;
 
   @override
   void initState() {
@@ -31,14 +33,20 @@ class _SettingsPageState extends State<SettingsPage> {
       final doc = await _db.collection('config').doc('inventory_rules').get();
       if (doc.exists) {
         final data = doc.data()!;
-        _defaultWeightController.text = (data['default_weight'] ?? 25.0).toString();
         _maxRollsController.text = (data['bin_capacity'] ?? 10).toString(); // Mapped to existing field
-        _maxWeightController.text = (data['max_bin_weight'] ?? 100.0).toString();
+        _maxWeightController.text = (data['max_bin_weight'] ?? 500.0).toString();
+        _maxBinsController.text = (data['max_bins'] ?? 50).toString();
+        
+        _initialMaxRolls = data['bin_capacity'] ?? 10;
+        _initialMaxBins = data['max_bins'] ?? 50;
       } else {
         // Defaults
-        _defaultWeightController.text = '25.0';
         _maxRollsController.text = '10';
-        _maxWeightController.text = '100.0';
+        _maxWeightController.text = '500.0';
+        _maxBinsController.text = '50';
+        
+        _initialMaxRolls = 10;
+        _initialMaxBins = 50;
       }
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error loading settings: $e')));
@@ -53,9 +61,9 @@ class _SettingsPageState extends State<SettingsPage> {
     setState(() => _isSaving = true);
     try {
       await _db.collection('config').doc('inventory_rules').set({
-        'default_weight': double.tryParse(_defaultWeightController.text) ?? 25.0,
-        'bin_capacity': int.tryParse(_maxRollsController.text) ?? 10, // Maintaining backward compatibility name
-        'max_bin_weight': double.tryParse(_maxWeightController.text) ?? 100.0,
+        'bin_capacity': int.tryParse(_maxRollsController.text) ?? 10,
+        'max_bin_weight': double.tryParse(_maxWeightController.text) ?? 500.0,
+        'max_bins': int.tryParse(_maxBinsController.text) ?? 50,
         'updatedAt': FieldValue.serverTimestamp(),
       }, SetOptions(merge: true));
 
@@ -99,19 +107,6 @@ class _SettingsPageState extends State<SettingsPage> {
                         style: TextStyle(color: Colors.grey)),
                     const SizedBox(height: 20),
                     
-                    _buildSectionHeader('Yarn Defaults'),
-                    const SizedBox(height: 10),
-                    TextFormField(
-                      controller: _defaultWeightController,
-                      decoration: const InputDecoration(
-                        labelText: 'Default Roll Weight (kg)',
-                        border: OutlineInputBorder(),
-                        helperText: 'Used if QR code does not contain weight data.',
-                      ),
-                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                      validator: (val) => val == null || val.isEmpty ? 'Required' : null,
-                    ),
-
                     const SizedBox(height: 24),
                     _buildSectionHeader('Bin Capacity Limits'),
                     const SizedBox(height: 10),
@@ -124,7 +119,12 @@ class _SettingsPageState extends State<SettingsPage> {
                         prefixIcon: Icon(Icons.numbers),
                       ),
                       keyboardType: TextInputType.number,
-                      validator: (val) => val == null || val.isEmpty ? 'Required' : null,
+                      validator: (val) {
+                          if (val == null || val.isEmpty) return 'Required';
+                          final n = int.tryParse(val) ?? 0;
+                          if (n < _initialMaxRolls) return 'Capacity cannot be reduced (Current: $_initialMaxRolls)';
+                          return null;
+                      },
                     ),
                     const SizedBox(height: 16),
                     TextFormField(
@@ -136,6 +136,23 @@ class _SettingsPageState extends State<SettingsPage> {
                       ),
                       keyboardType: const TextInputType.numberWithOptions(decimal: true),
                       validator: (val) => val == null || val.isEmpty ? 'Required' : null,
+                    ),
+                    const SizedBox(height: 16),
+                    TextFormField(
+                      controller: _maxBinsController,
+                      decoration: const InputDecoration(
+                        labelText: 'Max Bins per Rack (Count)',
+                        border: OutlineInputBorder(),
+                        prefixIcon: Icon(Icons.grid_goldenratio),
+                        helperText: 'Limits how many bins the auto-allocator searches per rack.',
+                      ),
+                      keyboardType: TextInputType.number,
+                      validator: (val) {
+                          if (val == null || val.isEmpty) return 'Required';
+                          final n = int.tryParse(val) ?? 0;
+                          if (n < _initialMaxBins) return 'Bin count cannot be reduced (Current: $_initialMaxBins)';
+                          return null;
+                      },
                     ),
 
                     const SizedBox(height: 40),

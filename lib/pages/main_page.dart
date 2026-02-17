@@ -37,7 +37,7 @@ class _MainPageState extends State<MainPage> {
         ),
         body: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-          child: _isLoading ? _shimmerLoader() : _mainContent(context),
+          child: _isLoading ? _shimmerLoader() : SingleChildScrollView(child: _mainContent(context)),
         ),
       ),
     );
@@ -90,7 +90,7 @@ class _MainPageState extends State<MainPage> {
             ),
           ],
         ),
-
+        SizedBox(height: 70),
         // Footer text at the bottom
         Text(
           '© 2026 Yarn Scanner. All rights reserved.',

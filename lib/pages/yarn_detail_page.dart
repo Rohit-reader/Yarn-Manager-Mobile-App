@@ -38,6 +38,7 @@ class _YarnDataPageState extends State<YarnDataPage> {
   bool isLoading = true;
   bool isProcessing = false;
   bool isInvalidQr = false;
+  String? yarnRollDocId;
   
   // Batch & Weight
   final TextEditingController _countController = TextEditingController(text: '1');
@@ -93,7 +94,10 @@ class _YarnDataPageState extends State<YarnDataPage> {
       } else {
           final doc = await yarnService.findYarnByContent(widget.qr);
           if (doc != null && doc.exists) {
-            setState(() => yarnData = doc.data() as Map<String, dynamic>);
+            setState(() {
+              yarnData = doc.data() as Map<String, dynamic>;
+              yarnRollDocId = doc.id;
+            });
           } else {
             setState(() => yarnData = {'id': widget.qr, 'notFound': true});
           }
@@ -132,13 +136,7 @@ class _YarnDataPageState extends State<YarnDataPage> {
   }
 
   Future<void> _fetchDefaultWeight() async {
-      try {
-          // Quick fetch of default weight if not in QR
-           final doc = await FirebaseFirestore.instance.collection('config').doc('inventory_rules').get();
-           if (doc.exists && mounted && _weightController.text.isEmpty) {
-               _weightController.text = (doc.data()?['default_weight'] ?? 25.0).toString();
-           }
-      } catch (_) {}
+      // Logic removed: each roll must have its own weight.
   }
 
   Future<void> _fetchAutoAllocation() async {
@@ -148,7 +146,9 @@ class _YarnDataPageState extends State<YarnDataPage> {
           final int count = int.tryParse(_countController.text) ?? 1;
           final double weight = double.tryParse(_weightController.text) ?? 25.0;
 
-          final allocation = await yarnService.getNextAvailableBin(count: count, weightPerRoll: weight);
+          // We ask for space for 1 roll to find the STARTING bin. 
+          // The addYarn process handles distribution for the rest.
+          final allocation = await yarnService.getNextAvailableBin(count: 1, weightPerRoll: weight);
           
           if (mounted) {
               setState(() {
@@ -225,8 +225,13 @@ class _YarnDataPageState extends State<YarnDataPage> {
       final int? manualRack = int.tryParse(_rackController.text);
       final int? manualBin = int.tryParse(_binController.text);
       
-      // Use weight from controller (if valid) or fallback
-      final double weight = double.tryParse(_weightController.text) ?? 25.0;
+      // Use weight from controller
+      final double? weight = double.tryParse(_weightController.text);
+      if (weight == null) {
+          showAck(context, 'Error: Please provide a valid weight for the roll.');
+          setState(() => isProcessing = false);
+          return;
+      }
 
       // Pass the explicit bin/rack IDs if available
       String systemId = await yarnService.addYarn(
@@ -264,11 +269,25 @@ class _YarnDataPageState extends State<YarnDataPage> {
           final yarnService = YarnService();
           
           if (widget.isDispatchMode) {
-              await yarnService.deleteReservedYarnById(widget.reservedDocId!);
+              // Mark as DISPATCHED instead of deleting
+              // 1. Update status in reserved collection
+              await yarnService.updateYarnStatus(widget.reservedDocId!, 'DISPATCHED');
+              
+              // 2. Update status in main inventory
+              if (yarnRollDocId != null) {
+                  await yarnService.updateYarnRollStatus(yarnRollDocId!, 'DISPATCHED');
+              } else {
+                  // Fallback: try to find it again if ID was lost
+                  final doc = await yarnService.findYarnByContent(widget.qr);
+                  if (doc != null) {
+                      await yarnService.updateYarnRollStatus(doc.id, 'DISPATCHED');
+                  }
+              }
+              
               if (!mounted) return;
-              showAck(context, 'Yarn dispatched and removed from list!');
+              showAck(context, 'Yarn successfully dispatched!');
           } else {
-              await yarnService.updateYarnStatus(widget.reservedDocId!, 'moved');
+              await yarnService.updateYarnStatus(widget.reservedDocId!, 'waiting for dispatch');
               if (!mounted) return;
               showAck(context, 'Yarn successfully moved to dispatch!');
           }
@@ -287,17 +306,24 @@ class _YarnDataPageState extends State<YarnDataPage> {
 
 
 
-  /// Navigate to QR scanner page
+  /// Navigate back to camera or rescan
   void _rescan() {
-    Navigator.pushReplacement(
-      context,
-      MaterialPageRoute(
-        builder: (_) => ScanCodePage(
-            expectedQr: widget.expectedQr,
-            reservedDocId: widget.reservedDocId, // Preserve validation context
-        ),
-      ),
-    );
+    if (widget.isAddMode || widget.reservedDocId != null) {
+        // Return to ScanCodePage and signal a retry
+        Navigator.pop(context, false); 
+    } else {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (_) => ScanCodePage(
+                expectedQr: widget.expectedQr,
+                reservedDocId: widget.reservedDocId, 
+                isAddMode: widget.isAddMode,
+                isDispatchMode: widget.isDispatchMode,
+            ),
+          ),
+        );
+    }
   }
 
   /// Export yarn data as PDF
@@ -368,360 +394,341 @@ class _YarnDataPageState extends State<YarnDataPage> {
 
   @override
   Widget build(BuildContext context) {
-    // Styling inspired by ReservedListPage
     final primaryColor = Colors.green.shade700;
     
-    return SafeArea(child: Scaffold(
-      backgroundColor: Colors.white,
-      appBar: AppBar(
+    return SafeArea(
+      child: Scaffold(
         backgroundColor: Colors.white,
-        title: Text(widget.isAddMode ? 'Confirm Addition' : 'Yarn Details'),
-        automaticallyImplyLeading: false,
-        actions: [
-          IconButton(
-            onPressed: _exportAsPdf,
-            icon: const Icon(Icons.picture_as_pdf, color: Colors.grey),
-            tooltip: 'Export as PDF',
-          ),
-        ],
-      ),
-      body: isLoading
-          ? const Center(child: CircularProgressIndicator(color: Colors.orange))
-          : isInvalidQr 
-          ? Center(
-              child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                      const Icon(Icons.error_outline, color: Colors.red, size: 80),
-                      const SizedBox(height: 20),
-                      const Text('Invalid QR Code', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Colors.red)),
-                      const SizedBox(height: 10),
-                      Text('Expected: ${widget.expectedQr}', style: const TextStyle(fontSize: 16)),
-                      const SizedBox(height: 40),
-                      ElevatedButton.icon(
+        appBar: AppBar(
+          backgroundColor: Colors.white,
+          title: Text(widget.isAddMode ? 'Confirm Addition' : 'Yarn Details'),
+          automaticallyImplyLeading: false,
+          actions: [
+            IconButton(
+              onPressed: _exportAsPdf,
+              icon: const Icon(Icons.picture_as_pdf, color: Colors.grey),
+              tooltip: 'Export as PDF',
+            ),
+          ],
+        ),
+        body: isLoading
+            ? const Center(child: CircularProgressIndicator(color: Colors.orange))
+            : isInvalidQr 
+                ? Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Icon(Icons.error_outline, color: Colors.red, size: 80),
+                        const SizedBox(height: 20),
+                        const Text('Invalid QR Code', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Colors.red)),
+                        const SizedBox(height: 10),
+                        Text('Expected: ${widget.expectedQr}', style: const TextStyle(fontSize: 16)),
+                        const SizedBox(height: 40),
+                        ElevatedButton.icon(
                           onPressed: _rescan,
                           icon: const Icon(Icons.qr_code_scanner),
                           label: const Text('Try Again'),
                           style: ElevatedButton.styleFrom(
-                              backgroundColor: Colors.red,
-                              foregroundColor: Colors.white,
-                              padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16)
-                          ),
-                      )
-                  ]
-              )
-          )
-          : yarnData == null
-          ? const Center(child: Text('No Data Found'))
-          : SingleChildScrollView(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          children: [
-            // ================== CARD STYLE (Like Reserved List) ==================
-            Container(
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(16),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withOpacity(0.05),
-                    blurRadius: 15,
-                    offset: const Offset(0, 8),
-                  ),
-                ],
-                border: Border.all(color: Colors.grey.shade100)
-              ),
-              padding: const EdgeInsets.all(20),
-              child: Column(
-                children: [
-                   Row(
-                      children: [
-                        Container(
-                          decoration: BoxDecoration(
-                            color: Colors.green.withOpacity(0.15),
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          padding: const EdgeInsets.all(16),
-                          child: Icon(
-                            Icons.inventory_2_outlined,
-                            color: primaryColor,
-                            size: 32,
-                          ),
-                        ),
-                        const SizedBox(width: 16),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                yarnData!['id'] ?? yarnData!['yarnId'] ?? 'Unknown ID',
-                                style: const TextStyle(
-                                  fontSize: 18,
-                                  fontWeight: FontWeight.bold,
-                                  color: Colors.black87
-                                ),
-                              ),
-                              const SizedBox(height: 6),
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 10, vertical: 4),
-                                decoration: BoxDecoration(
-                                  color: widget.isAddMode ? Colors.blue.withOpacity(0.15) : Colors.green.withOpacity(0.15),
-                                  borderRadius: BorderRadius.circular(20),
-                                ),
-                                child: Text(
-                                  widget.isAddMode ? 'NEW ENTRY' : 'RESERVED',
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w700,
-                                    color: widget.isAddMode ? Colors.blue : Colors.green,
-                                  ),
-                                ),
-                              ),
-                            ],
+                            backgroundColor: Colors.red,
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
                           ),
                         ),
                       ],
                     ),
-                    const SizedBox(height: 24),
-                    
-                    // Auto-Allocation Display
-                    if (widget.isAddMode) ...[
-                        if (isAllocating)
-                             const Padding(
-                                 padding: EdgeInsets.only(bottom: 20),
-                                 child: Row(children: [
-                                     SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
-                                     SizedBox(width: 10),
-                                     Text("Finding best location...", style: TextStyle(color: Colors.blue, fontStyle: FontStyle.italic))
-                                 ]),
-                             )
-                         else if (assignedRackId != null && assignedBinId != null)
-                             Container(
-                                 margin: const EdgeInsets.only(bottom: 20),
-                                 padding: const EdgeInsets.all(12),
-                                 decoration: BoxDecoration(
-                                     color: Colors.blue.shade50,
-                                     borderRadius: BorderRadius.circular(8),
-                                     border: Border.all(color: Colors.blue.shade200)
-                                 ),
-                                 child: Column(
-                                     crossAxisAlignment: CrossAxisAlignment.start,
-                                     children: [
-                                         const Text("Assigned Location (Editable)", style: TextStyle(color: Colors.blue, fontWeight: FontWeight.bold, fontSize: 12)),
-                                         const SizedBox(height: 8),
-                                         Row(children: [
-                                             Expanded(
-                                                 child: TextFormField(
-                                                     controller: _rackController,
-                                                     keyboardType: TextInputType.number,
-                                                     decoration: const InputDecoration(
-                                                         labelText: "Rack ID",
-                                                         isDense: true,
-                                                         border: OutlineInputBorder(),
-                                                         prefixIcon: Icon(Icons.grid_view, size: 18),
-                                                     ),
-                                                 ),
-                                             ),
-                                             const SizedBox(width: 12),
-                                             Expanded(
-                                                 child: TextFormField(
-                                                     controller: _binController,
-                                                     keyboardType: TextInputType.number,
-                                                     decoration: const InputDecoration(
-                                                         labelText: "Bin ID",
-                                                         isDense: true,
-                                                         border: OutlineInputBorder(),
-                                                         prefixIcon: Icon(Icons.shelves, size: 18),
-                                                     ),
-                                                 ),
-                                             ),
-                                         ]),
-                                     ]
-                                 ),
-                             )
-                        else
-                             // Should rarely happen now with fallback logic
-                             Container(
-                                 margin: const EdgeInsets.only(bottom: 20),
-                                 padding: const EdgeInsets.all(12),
-                                 decoration: BoxDecoration(
-                                     color: Colors.blue.shade50,
-                                     borderRadius: BorderRadius.circular(8),
-                                     border: Border.all(color: Colors.blue.shade200)
-                                 ),
-                                 child: const Row(children: [
-                                     Icon(Icons.info, color: Colors.blue, size: 20),
-                                     const SizedBox(width: 10),
-                                     Expanded(child: Text("Defaulting to Rack 1, Bin 1", style: TextStyle(color: Colors.blue, fontWeight: FontWeight.bold))),
-                                 ]),
-                             ),
-                    ],
-
-                    const Divider(height: 1),
-                    const SizedBox(height: 16),
-                    
-                    // Detailed List inside Card
-                    ...yarnData!.entries
-                    .where((e) => ![
-                  'notfound', 'status', 'createdat', 'rawqr', 'qrimage',
-                  'originalqrid', 'last_state_change', 'id', 'yarnid', 'weight' // Lowercase check
-                ].contains(e.key.toLowerCase()))
-                    .map(
-                      (e) => Padding(
-                        padding: const EdgeInsets.only(bottom: 12),
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  )
+                : yarnData == null
+                    ? const Center(child: Text('No Data Found'))
+                    : SingleChildScrollView(
+                        padding: const EdgeInsets.all(16),
+                        child: Column(
                           children: [
-                            Text(
-                              _capitalize(e.key),
-                              style: TextStyle(
-                                  fontWeight: FontWeight.w500,
-                                  fontSize: 14,
-                                  color: Colors.grey.shade600),
-                            ),
-                            Flexible(
-                              child: Text(
-                                e.value.toString(),
-                                textAlign: TextAlign.right,
-                                style: const TextStyle(
-                                    fontWeight: FontWeight.w600,
-                                    fontSize: 15,
-                                    color: Colors.black87),
+                            Container(
+                              decoration: BoxDecoration(
+                                color: Colors.white,
+                                borderRadius: BorderRadius.circular(16),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: Colors.black.withOpacity(0.05),
+                                    blurRadius: 15,
+                                    offset: const Offset(0, 8),
+                                  ),
+                                ],
+                                border: Border.all(color: Colors.grey.shade100),
+                              ),
+                              padding: const EdgeInsets.all(20),
+                              child: Column(
+                                children: [
+                                  Row(
+                                    children: [
+                                      Container(
+                                        decoration: BoxDecoration(
+                                          color: Colors.green.withOpacity(0.15),
+                                          borderRadius: BorderRadius.circular(12),
+                                        ),
+                                        padding: const EdgeInsets.all(16),
+                                        child: Icon(
+                                          Icons.inventory_2_outlined,
+                                          color: primaryColor,
+                                          size: 32,
+                                        ),
+                                      ),
+                                      const SizedBox(width: 16),
+                                      Expanded(
+                                        child: Column(
+                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          children: [
+                                            Text(
+                                              yarnData!['id'] ?? yarnData!['yarnId'] ?? 'Unknown ID',
+                                              style: const TextStyle(
+                                                fontSize: 18,
+                                                fontWeight: FontWeight.bold,
+                                                color: Colors.black87,
+                                              ),
+                                            ),
+                                            const SizedBox(height: 6),
+                                            Container(
+                                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                              decoration: BoxDecoration(
+                                                color: widget.isAddMode ? Colors.blue.withOpacity(0.15) : Colors.green.withOpacity(0.15),
+                                                borderRadius: BorderRadius.circular(20),
+                                              ),
+                                              child: Text(
+                                                widget.isAddMode ? 'NEW ENTRY' : 'RESERVED',
+                                                style: TextStyle(
+                                                  fontSize: 12,
+                                                  fontWeight: FontWeight.w700,
+                                                  color: widget.isAddMode ? Colors.blue : Colors.green,
+                                                ),
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 24),
+                                  if (widget.isAddMode) ...[
+                                    if (isAllocating)
+                                      const Padding(
+                                        padding: EdgeInsets.only(bottom: 20),
+                                        child: Row(
+                                          children: [
+                                            SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+                                            SizedBox(width: 10),
+                                            Text("Finding best location...", style: TextStyle(color: Colors.blue, fontStyle: FontStyle.italic)),
+                                          ],
+                                        ),
+                                      )
+                                    else if (assignedRackId != null && assignedBinId != null)
+                                      Container(
+                                        margin: const EdgeInsets.only(bottom: 20),
+                                        padding: const EdgeInsets.all(12),
+                                        decoration: BoxDecoration(
+                                          color: Colors.blue.shade50,
+                                          borderRadius: BorderRadius.circular(8),
+                                          border: Border.all(color: Colors.blue.shade200),
+                                        ),
+                                        child: Column(
+                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          children: [
+                                            Text((int.tryParse(_countController.text) ?? 1) > 1 ? "Starting Location (Editable)" : "Assigned Location (Editable)", style: const TextStyle(color: Colors.blue, fontWeight: FontWeight.bold, fontSize: 12)),
+                                            const SizedBox(height: 8),
+                                            Row(
+                                              children: [
+                                                Expanded(
+                                                  child: TextFormField(
+                                                    controller: _rackController,
+                                                    keyboardType: TextInputType.number,
+                                                    decoration: const InputDecoration(
+                                                      labelText: "Rack ID",
+                                                      isDense: true,
+                                                      border: OutlineInputBorder(),
+                                                      prefixIcon: Icon(Icons.grid_view, size: 18),
+                                                    ),
+                                                  ),
+                                                ),
+                                                const SizedBox(width: 12),
+                                                Expanded(
+                                                  child: TextFormField(
+                                                    controller: _binController,
+                                                    keyboardType: TextInputType.number,
+                                                    decoration: const InputDecoration(
+                                                      labelText: "Bin ID",
+                                                      isDense: true,
+                                                      border: OutlineInputBorder(),
+                                                      prefixIcon: Icon(Icons.shelves, size: 18),
+                                                    ),
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ],
+                                        ),
+                                      )
+                                    else
+                                      Container(
+                                        margin: const EdgeInsets.only(bottom: 20),
+                                        padding: const EdgeInsets.all(12),
+                                        decoration: BoxDecoration(
+                                          color: Colors.blue.shade50,
+                                          borderRadius: BorderRadius.circular(8),
+                                          border: Border.all(color: Colors.blue.shade200),
+                                        ),
+                                        child: const Row(
+                                          children: [
+                                            Icon(Icons.info, color: Colors.blue, size: 20),
+                                            SizedBox(width: 10),
+                                            Expanded(child: Text("Defaulting to Rack 1, Bin 1", style: TextStyle(color: Colors.blue, fontWeight: FontWeight.bold))),
+                                          ],
+                                        ),
+                                      ),
+                                  ],
+                                  const Divider(height: 1),
+                                  const SizedBox(height: 16),
+                                  ...yarnData!.entries.where((e) => ![
+                                    'notfound', 'status', 'createdat', 'rawqr', 'qrimage',
+                                    'originalqrid', 'last_state_change', 'id', 'yarnid'
+                                  ].contains(e.key.toLowerCase())).map(
+                                    (e) => Padding(
+                                      padding: const EdgeInsets.only(bottom: 12),
+                                      child: Row(
+                                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                        children: [
+                                          Text(
+                                            _capitalize(e.key),
+                                            style: TextStyle(fontWeight: FontWeight.w500, fontSize: 14, color: Colors.grey.shade600),
+                                          ),
+                                          Flexible(
+                                            child: Text(
+                                              e.value.toString(),
+                                              textAlign: TextAlign.right,
+                                              style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15, color: Colors.black87),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ).toList(),
+                                  if (widget.isAddMode) ...[
+                                    const Divider(height: 30),
+                                    const Text("Batch Inventory Details", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                                    const SizedBox(height: 16),
+                                    TextFormField(
+                                      controller: _countController,
+                                      keyboardType: TextInputType.number,
+                                      decoration: const InputDecoration(
+                                        labelText: "Count",
+                                        border: OutlineInputBorder(),
+                                        contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                      ),
+                                      onChanged: (_) => _fetchAutoAllocation(),
+                                    ),
+                                    const SizedBox(height: 16),
+                                    TextFormField(
+                                      controller: _weightController,
+                                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                                      decoration: const InputDecoration(
+                                        labelText: "Weight per Roll (kg)",
+                                        border: OutlineInputBorder(),
+                                        contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                      ),
+                                      onChanged: (_) => _fetchAutoAllocation(),
+                                    ),
+                                  ],
+                                ],
                               ),
                             ),
+                            const SizedBox(height: 30),
+                            if (isProcessing)
+                              const Center(child: CircularProgressIndicator(color: Colors.orange))
+                            else
+                              Row(
+                                children: [
+                                  Expanded(
+                                    child: Container(
+                                      decoration: BoxDecoration(
+                                        gradient: const LinearGradient(
+                                          colors: [Colors.redAccent, Colors.red],
+                                          begin: Alignment.topLeft,
+                                          end: Alignment.bottomRight,
+                                        ),
+                                        borderRadius: BorderRadius.circular(15),
+                                        boxShadow: [
+                                          BoxShadow(
+                                            color: Colors.redAccent.withOpacity(0.6),
+                                            blurRadius: 12,
+                                            spreadRadius: 1,
+                                            offset: const Offset(0, 4),
+                                          ),
+                                        ],
+                                      ),
+                                      child: Material(
+                                        color: Colors.transparent,
+                                        child: InkWell(
+                                          borderRadius: BorderRadius.circular(15),
+                                          onTap: _rescan,
+                                          child: const Padding(
+                                            padding: EdgeInsets.symmetric(vertical: 14),
+                                            child: Center(
+                                              child: Text(
+                                                'Rescan',
+                                                style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16),
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 16),
+                                  if (widget.isAddMode || widget.reservedDocId != null)
+                                    Expanded(
+                                      child: Container(
+                                        decoration: BoxDecoration(
+                                          gradient: LinearGradient(
+                                            colors: widget.reservedDocId != null 
+                                              ? (widget.isDispatchMode ? [Colors.orangeAccent, Colors.deepOrange] : [Colors.blueAccent, Colors.blue])
+                                              : [Colors.greenAccent, Colors.green],
+                                            begin: Alignment.topLeft,
+                                            end: Alignment.bottomRight,
+                                          ),
+                                          borderRadius: BorderRadius.circular(15),
+                                          boxShadow: [
+                                            BoxShadow(
+                                              color: (widget.reservedDocId != null ? (widget.isDispatchMode ? Colors.orange : Colors.blue) : Colors.green).withOpacity(0.6),
+                                              blurRadius: 12,
+                                              spreadRadius: 1,
+                                              offset: const Offset(0, 4),
+                                            ),
+                                          ],
+                                        ),
+                                        child: Material(
+                                          color: Colors.transparent,
+                                          child: InkWell(
+                                            borderRadius: BorderRadius.circular(15),
+                                            onTap: widget.reservedDocId != null ? _confirmMove : _confirmYarn,
+                                            child: Padding(
+                                              padding: const EdgeInsets.symmetric(vertical: 14),
+                                              child: Center(
+                                                child: Text(
+                                                  widget.reservedDocId != null 
+                                                    ? (widget.isDispatchMode ? 'Confirm Dispatch' : 'Confirm Move') 
+                                                    : 'Confirm Add',
+                                                  style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 14),
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                ],
+                              ),
                           ],
                         ),
                       ),
-                    ).toList(),
-                    
-                    if (widget.isAddMode) ...[
-                        const Divider(height: 30),
-                        const Text("Batch Inventory Details", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                        const SizedBox(height: 16),
-                        Row(
-                            children: [
-                                Expanded(
-                                    child: TextFormField(
-                                        controller: _countController,
-                                        keyboardType: TextInputType.number,
-                                        decoration: const InputDecoration(
-                                            labelText: "Count",
-                                            border: OutlineInputBorder(),
-                                            contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 8)
-                                        ),
-                                        onChanged: (_) => _fetchAutoAllocation(),
-                                    ),
-                                ),
-                            ],
-                        ),
-                    ],
-                ],
-              ),
-            ),
-            
-            const SizedBox(height: 30),
-            
-            // ================== ACTION BUTTONS ==================
-            if (isProcessing)
-              const Center(
-                  child:
-                  CircularProgressIndicator(color: Colors.orange))
-            else
-              Row(
-                children: [
-                  // CANCEL / RESCAN Button
-                  Expanded(
-                    child: Container(
-                      decoration: BoxDecoration(
-                        gradient: const LinearGradient(
-                          colors: [Colors.redAccent, Colors.red],
-                          begin: Alignment.topLeft,
-                          end: Alignment.bottomRight,
-                        ),
-                        borderRadius: BorderRadius.circular(15),
-                        boxShadow: [
-                          BoxShadow(
-                            color: Colors.redAccent.withOpacity(0.6),
-                            blurRadius: 12,
-                            spreadRadius: 1,
-                            offset: const Offset(0, 4),
-                          ),
-                        ],
-                      ),
-                      child: Material(
-                        color: Colors.transparent,
-                        child: InkWell(
-                          borderRadius: BorderRadius.circular(15),
-                          onTap: _rescan,
-                          child: const Padding(
-                            padding: EdgeInsets.symmetric(vertical: 14),
-                            child: Center(
-                              child: Text(
-                                'Rescan',
-                                style: TextStyle(
-                                    color: Colors.white,
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 16),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 16),
-
-                  // CONFIRM Button (Only in Add Mode or Move/Dispatch Mode)
-                  if (widget.isAddMode || widget.reservedDocId != null)
-                  Expanded(
-                    child: Container(
-                      decoration: BoxDecoration(
-                        gradient: LinearGradient(
-                          colors: widget.reservedDocId != null 
-                             ? (widget.isDispatchMode ? [Colors.orangeAccent, Colors.deepOrange] : [Colors.blueAccent, Colors.blue])
-                             : [Colors.greenAccent, Colors.green],
-                          begin: Alignment.topLeft,
-                          end: Alignment.bottomRight,
-                        ),
-                        borderRadius: BorderRadius.circular(15),
-                        boxShadow: [
-                          BoxShadow(
-                            color: (widget.reservedDocId != null ? (widget.isDispatchMode ? Colors.orange : Colors.blue) : Colors.green).withOpacity(0.6),
-                            blurRadius: 12,
-                            spreadRadius: 1,
-                            offset: const Offset(0, 4),
-                          ),
-                        ],
-                      ),
-                      child: Material(
-                        color: Colors.transparent,
-                        child: InkWell(
-                          borderRadius: BorderRadius.circular(15),
-                          onTap: widget.reservedDocId != null ? _confirmMove : _confirmYarn,
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(vertical: 14),
-                            child: Center(
-                              child: Text(
-                                widget.reservedDocId != null 
-                                    ? (widget.isDispatchMode ? 'Confirm Dispatch' : 'Confirm Move') 
-                                    : 'Confirm Add',
-                                style: const TextStyle(
-                                    color: Colors.white,
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 14),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-          ],
-        ),
       ),
-    ));
+    );
   }
 }
